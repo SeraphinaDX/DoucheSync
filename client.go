@@ -35,7 +35,13 @@ type Client struct {
 	guard           replayGuard
 	mu              sync.Mutex
 	peers           map[string][]Announcement
+	peerChecks      map[string]peerCheck
 	transferTimeout time.Duration
+}
+
+type peerCheck struct {
+	url, fingerprint string
+	ok               bool
 }
 
 func NewClient(cfg Config) (*Client, error) {
@@ -231,6 +237,23 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 			accepted = append(accepted, p)
 		}
 		c.mu.Lock()
+		previous := map[string]Announcement{}
+		for _, p := range c.peers[room] {
+			previous[p.Device] = p
+		}
+		for _, p := range accepted {
+			old, known := previous[p.Device]
+			if !known || old.URL != p.URL || old.Fingerprint != p.Fingerprint {
+				log.Printf("[%s] discovered peer %s at %s", f.cfg.ID, p.Device, p.URL)
+				delete(c.peerChecks, room+"/"+p.Device)
+			}
+		}
+		for _, p := range c.peers[room] {
+			if !seen[p.Device] {
+				log.Printf("[%s] peer %s no longer advertised by discovery", f.cfg.ID, p.Device)
+				delete(c.peerChecks, room+"/"+p.Device)
+			}
+		}
 		c.peers[room] = accepted
 		c.mu.Unlock()
 	}
@@ -271,13 +294,50 @@ func (c *Client) Cycle(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if err := c.syncPeer(ctx, f, a); err != nil {
+			err := c.syncPeer(ctx, f, a)
+			if ctx.Err() == nil {
+				c.reportPeerCheck(room, f.cfg.ID, a, err)
+			}
+			if err != nil {
 				errs = append(errs, fmt.Errorf("folder %s, peer %s: %w", f.cfg.ID, a.Device, err))
 			}
 		}
 	}
 	return errors.Join(errs...)
 }
+
+// Report state changes, rather than repeating an idle success each scan. A
+// successful check includes pinned TLS, the manifest, and any required pulls;
+// it does not imply a permanently open connection.
+func (c *Client) reportPeerCheck(room, folderID string, a Announcement, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Discovery can change while a transfer is in progress. Do not report a
+	// completed check of an old endpoint as the status of its replacement.
+	current := false
+	for _, p := range c.peers[room] {
+		if p.Device == a.Device && p.URL == a.URL && p.Fingerprint == a.Fingerprint {
+			current = true
+			break
+		}
+	}
+	if !current {
+		return
+	}
+	if c.peerChecks == nil {
+		c.peerChecks = map[string]peerCheck{}
+	}
+	key := room + "/" + a.Device
+	old, known := c.peerChecks[key]
+	known = known && old.url == a.URL && old.fingerprint == a.Fingerprint
+	if err == nil && (!known || !old.ok) {
+		log.Printf("[%s] peer %s reachable at %s; sync check complete", folderID, a.Device, a.URL)
+	} else if err != nil && known && old.ok {
+		log.Printf("[%s] sync check with peer %s failed; retrying", folderID, a.Device)
+	}
+	c.peerChecks[key] = peerCheck{url: a.URL, fingerprint: a.Fingerprint, ok: err == nil}
+}
+
 func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error {
 	h := pinnedClient(a, c.transferTimeout)
 	resp, err := peerGET(ctx, h, a, f, "/v1/manifest?room="+roomID(f.cfg))

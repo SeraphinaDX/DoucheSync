@@ -24,6 +24,16 @@ func snapshotFiles(t *testing.T, roots ...string) map[string]string {
 				return err
 			}
 			if !d.IsDir() {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				// Empty files have a known digest. Windows mandatory locks
+				// forbid ReadFile even on the client's empty lock files.
+				if info.Size() == 0 {
+					files[path] = digest(nil)
+					return nil
+				}
 				b, err := os.ReadFile(path)
 				if err != nil {
 					return err

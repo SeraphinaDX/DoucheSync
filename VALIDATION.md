@@ -1,4 +1,4 @@
-# Validation for DoucheSync 0.1.2
+# Validation for DoucheSync 0.1.3
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 

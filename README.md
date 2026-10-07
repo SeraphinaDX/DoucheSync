@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.1.2 synchronizes files in one or more folders directly between
+DoucheSync 0.1.3 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -82,6 +82,23 @@ an existing device ID or deleting `.douchesync` history as a troubleshooting ste
 The normal `no matching peers discovered yet` message describes an empty peer
 list. It is not a failed reachability test. The discovery server does not need
 an upgrade for this diagnostic command.
+
+Normal client logs now also show peer activity, including empty folders:
+
+```text
+[test-folder] discovered peer laptop at https://10.0.0.63:7444
+[test-folder] peer laptop reachable at https://10.0.0.63:7444; sync check complete
+```
+
+Discovery is logged when a peer first appears or its endpoint/identity changes.
+A completed sync check is logged on the first success and after recovery from
+a failed check. File receipts, deletions, conflicts, and errors are logged as
+they happen. Removed discovery announcements are logged as well; an abruptly
+stopped client's advertisement may remain until its lease expires.
+
+Checks and transfers use short HTTPS requests, rather than permanently open
+peer connections. An unchanged, healthy peer does not print the same success
+every scan; quiet output after a completed check is normal.
 
 ## Build from source
 

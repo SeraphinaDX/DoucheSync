@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.3.0"
+const version = "0.3.1"
 const defaultParallelTransfers = 4
 const maxParallelTransfers = 32
 const maxManifestBytes = 64 << 20

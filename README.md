@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.3.0 synchronizes files in one or more folders directly between
+DoucheSync 0.3.1 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -322,7 +322,7 @@ transferred in full. This release does not implement filesystem watching,
 block-level transfers, or parallel chunks of a single large file. Initial
 scan time and disk/history writes can still limit throughput.
 
-Version 0.3.0 is a client performance update. Stop the clients, run
+Version 0.3.1 is a client performance update. Stop the clients, run
 `git pull --ff-only` and `make build`, then restart them. Existing configurations
 get four workers without edits; keep your IDs, secrets, identity files, and
 `.douchesync` history. A 0.2.0 discovery server remains compatible.
@@ -357,6 +357,21 @@ Set `sync_deletes = true` **on every client sharing that folder** to propagate
 deletions. Deletions only apply to files that were previously tracked; an
 initially empty folder never means "delete everything on the other machine."
 
+Since 0.3.1, each peer's deletions are applied before downloading its files,
+so a slow download does not hold up that peer's deletion batch. Deletion
+history is saved as small atomic records, then checkpointed after every 128
+updates and at the end of the deletion phase. Pending records are replayed
+on startup, preserving version clocks after an interrupted batch. Recovery
+copies are still byte-verified and retained before removing a local file.
+
+Local deletes are discovered by the normal scan, so the delay still includes
+`scan_interval` (10 seconds by default) and scan time. Large files also take
+time to retain as recovery copies. Increasing `parallel_transfers` does not
+speed up that serialized disk work. The default `sync_deletes = false` restores
+missing files instead of propagating deletion; enable it on every client for
+each folder where deletions should sync.
+
+
 When a file is edited independently on two machines, version vectors detect
 the conflict. The live version with the lexicographically greater SHA-256 hash
 becomes the canonical copy, so peers converge without trusting their clocks.
@@ -368,7 +383,8 @@ Each shared root has a **local-only** `.douchesync` directory:
 - `state.json` and `identity`: persistent folder and version history.
 - `conflicts/`: saved losing versions from resolved concurrent edits.
 - `versions/`: saved local contents before remote replacement or deletion.
-- `transfers/`: incomplete downloads and temporary archive files.
+- `transfers/`: incomplete downloads and temporary archive/history files.
+- `updates/`: pending history records, replayed on startup and cleared after a checkpoint.
 - `lock`: an OS file lock that prevents two processes from using the same root.
 
 Saved versions use `<path-sha256>-<content-sha256>` filenames; the adjacent

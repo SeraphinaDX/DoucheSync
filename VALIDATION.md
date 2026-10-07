@@ -1,15 +1,15 @@
-# Validation for DoucheSync 0.3.0
+# Validation for DoucheSync 0.3.1
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 
-- All 47 automated Go tests pass locally on Linux, including the race detector.
+- All 53 automated Go tests pass locally on Linux, including the race detector.
 - `go vet -buildvcs=false ./...` passes.
 - Three separate client processes and one discovery server pass the process smoke test.
 - Initial files, remote updates, and enabled deletions converge across all three clients.
 - Discovery writes no files to its working directory.
 - All processes shut down cleanly on SIGTERM.
 - Linux x86-64 binary built with CGO_ENABLED=0 and exercised in the process test.
-- Windows x86-64 binary built with CGO_ENABLED=0 by cross-compilation; Native Linux and Windows CI also passed for the preceding 0.2.0 release; the updated suite runs on both platforms in GitHub Actions.
+- Windows x86-64 binary built with CGO_ENABLED=0 by cross-compilation. Native Linux and Windows CI passed for 0.3.0; the updated suite runs on both platforms in GitHub Actions.
 
 Coverage includes simultaneous transfers, multiple-folder isolation, persistent
 state after restart, concurrent edits, edit/delete conflicts, deletion disabled,
@@ -60,3 +60,17 @@ measured 819.4 ms/batch with one worker and 210.5 ms/batch with four, approximat
 file/history writes. Both modes use connection reuse. This demonstrates reduced
 per-file latency, not an expected speedup for all networks or large files, and
 is not a benchmark against another sync product.
+
+Deletion tests cover prioritization ahead of a stalled download, checkpoints
+before downloads, replay after an interrupted deletion, retained recovery
+contents, exact recovered clocks, periodic checkpoints across a 136-file batch,
+stale records left after a completed checkpoint, malformed or wrong-identity
+records, conflicting clocks, and unavailable history storage. Existing tests
+continue to verify deletion disabled and concurrent edit/delete behavior.
+
+`go test -buildvcs=false -run '^$' -bench BenchmarkDeleteHistory -benchtime=3x`
+measured 1.461 s for 128 full snapshot writes versus 26.99 ms for 128 small
+history records plus one checkpoint, in a 10,000-path history. This isolates
+history persistence and excludes scanning, network latency and copying retained
+file contents. Both modes fsync each mutation and produce the same final state;
+the improvement is not a claim that total deletion time improves by that factor.

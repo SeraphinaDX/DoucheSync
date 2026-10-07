@@ -440,7 +440,35 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 	}
 	c.preferred[roomID(f.cfg)+"/"+a.Device] = selected.URL
 	c.mu.Unlock()
-	paths := sortedPaths(remote)
+	var paths []string
+	var deleteErrs []error
+	// Tombstones require no file download. Apply them before any slow network
+	// pulls from this peer, and checkpoint their small durable history records
+	// once at the end of the phase (or periodically during a large batch).
+	for _, p := range sortedPaths(remote) {
+		if f.ignored(p) {
+			continue
+		}
+		if !remote[p].Deleted {
+			paths = append(paths, p)
+			continue
+		}
+		if ctx.Err() != nil {
+			break
+		}
+		if f.cfg.SyncDeletes {
+			if err := c.applyEntry(ctx, h, selected, f, p, remote[p]); err != nil {
+				deleteErrs = append(deleteErrs, fmt.Errorf("%s: %w", p, err))
+			}
+		}
+	}
+	f.mu.Lock()
+	if f.pendingUpdates != 0 {
+		if err := f.saveLocked(); err != nil {
+			deleteErrs = append(deleteErrs, fmt.Errorf("checkpoint deletions: %w", err))
+		}
+	}
+	f.mu.Unlock()
 	// Fixed workers and an unbuffered queue bound active transfers and avoid
 	// creating a goroutine (or buffering file contents) for every manifest entry.
 	workers, _ := parallelTransfers(c.cfg.ParallelTransfers)
@@ -475,7 +503,7 @@ queue:
 	}
 	close(jobs)
 	wg.Wait()
-	return errors.Join(append(errs, ctx.Err())...)
+	return errors.Join(append(append(deleteErrs, errs...), ctx.Err())...)
 }
 
 func (c *Client) fetchPeerManifest(ctx context.Context, f *Folder, a Announcement) (*http.Client, Announcement, map[string]Entry, error) {
@@ -587,36 +615,42 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 			}
 			l.Conflicted = l.Conflicted || r.Conflicted
 			f.state.Entries[p] = l
-			err := f.saveLocked()
+			err := f.persistEntryLocked(p, r.Deleted)
 			f.mu.Unlock()
 			return err
 		}
 	}
-	f.mu.Unlock()
 	tmp := ""
 	var err error
 	if !r.Deleted {
+		f.mu.Unlock()
 		tmp, err = downloadEntry(ctx, h, a, f, p, r)
 		if err != nil {
 			return err
 		}
 		defer f.root.Remove(tmp)
+		f.mu.Lock()
+		// Other workers may have committed new paths while this download ran.
+		if _, exists := f.state.Entries[p]; !exists && len(f.state.Entries) >= maxEntries {
+			f.mu.Unlock()
+			return errors.New("folder history exceeds 100000 paths")
+		}
+		if err = f.refreshLocked(p); err != nil {
+			f.mu.Unlock()
+			return err
+		}
+		current, nowExists := f.state.Entries[p]
+		if exists != nowExists || (exists && (compareClock(current.Clock, l.Clock) != 0 || !sameContent(current, l))) {
+			f.mu.Unlock()
+			return errors.New("local file changed during transfer; deferred to next cycle")
+		}
 	}
-	f.mu.Lock()
+	// A tombstone has no network gap: retain the lock and avoid hashing its
+	// destination twice. archiveLocal still verifies the retained bytes and
+	// rechecks the source immediately before deletion.
 	defer f.mu.Unlock()
 	if ctx.Err() != nil {
 		return ctx.Err()
-	}
-	// Other workers may have committed new paths while this download ran.
-	if _, exists := f.state.Entries[p]; !exists && len(f.state.Entries) >= maxEntries {
-		return errors.New("folder history exceeds 100000 paths")
-	}
-	if err = f.refreshLocked(p); err != nil {
-		return err
-	}
-	current, nowExists := f.state.Entries[p]
-	if exists != nowExists || (exists && (compareClock(current.Clock, l.Clock) != 0 || !sameContent(current, l))) {
-		return errors.New("local file changed during transfer; deferred to next cycle")
 	}
 	merged := r
 	merged.Clock = cloneClock(r.Clock)
@@ -693,7 +727,7 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 		}
 	}
 	f.state.Entries[p] = merged
-	return f.saveLocked()
+	return f.persistEntryLocked(p, r.Deleted)
 }
 func runClient(ctx context.Context, cfg Config, once bool) error {
 	c, err := NewClient(cfg)

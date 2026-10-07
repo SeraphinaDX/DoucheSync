@@ -39,13 +39,14 @@ type State struct {
 	Entries map[string]Entry `json:"entries"`
 }
 type Folder struct {
-	cfg     FolderConfig
-	device  string
-	root    *os.Root
-	lock    *os.File
-	mu      sync.Mutex
-	state   State
-	healthy bool
+	cfg            FolderConfig
+	device         string
+	root           *os.Root
+	lock           *os.File
+	mu             sync.Mutex
+	state          State
+	healthy        bool
+	pendingUpdates int
 }
 
 func cloneClock(c Clock) Clock {
@@ -259,6 +260,17 @@ func openFolder(cfg FolderConfig, device string) (*Folder, error) {
 	if err = r.MkdirAll(".douchesync/versions", 0700); err != nil {
 		return nil, err
 	}
+	if err = r.MkdirAll(".douchesync/updates", 0700); err != nil {
+		return nil, err
+	}
+	if err = f.replayUpdatesLocked(); err != nil {
+		return nil, fmt.Errorf("pending history updates: %w", err)
+	}
+	if f.pendingUpdates != 0 {
+		if err = f.saveLocked(); err != nil {
+			return nil, err
+		}
+	}
 	// A previous crash may leave an incomplete transfer, never a canonical file.
 	d, err := r.Open(".douchesync/transfers")
 	if err != nil {
@@ -311,7 +323,12 @@ func (f *Folder) saveLocked() (err error) {
 	if err != nil {
 		return err
 	}
-	return f.root.Rename(name, ".douchesync/state.json")
+	if err = f.root.Rename(name, ".douchesync/state.json"); err != nil {
+		return err
+	}
+	// If a crash occurs after the checkpoint rename but before cleanup, replay
+	// skips records whose clocks are already included in the checkpoint.
+	return f.discardUpdatesLocked()
 }
 func (f *Folder) snapshot() map[string]Entry {
 	f.mu.Lock()

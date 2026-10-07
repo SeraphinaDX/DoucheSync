@@ -1,0 +1,27 @@
+[client]
+device_id = "desktop"
+listen = ":7444"
+# The address OTHER CLIENTS can reach, not the discovery server's address.
+advertise_url = "https://192.168.1.10:7444"
+discovery_url = "https://sync.example.com"
+discovery_token = "REPLACE_WITH_DISCOVERY_KEY_FROM_KEYGEN"
+scan_interval = "10s"
+transfer_timeout = "30m"
+allow_http_discovery = false
+
+[[folders]]
+id = "documents"
+path = "~/Documents/Shared"
+# Same ID and secret on all clients sharing this folder. Paths may differ.
+secret = "REPLACE_WITH_DOCUMENTS_KEY_FROM_KEYGEN"
+sync_deletes = false
+ignore = ["*.tmp", "*.swp", ".git", "node_modules"]
+max_file_size = 10737418240 # 10 GiB
+
+[[folders]]
+id = "photos"
+path = "~/Pictures/Shared"
+secret = "REPLACE_WITH_PHOTOS_KEY_FROM_KEYGEN"
+sync_deletes = false
+ignore = ["*.tmp"]
+max_file_size = 10737418240

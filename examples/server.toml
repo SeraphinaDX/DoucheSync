@@ -1,0 +1,11 @@
+# Discovery only: no file storage and no transfer/relay endpoints.
+[server]
+listen = "127.0.0.1:7443"
+token = "REPLACE_WITH_DISCOVERY_KEY_FROM_KEYGEN"
+peer_ttl = "90s"
+max_peers = 1000
+
+# Leave these empty when a local HTTPS reverse proxy fronts this listener.
+# To expose this process directly, use TLS and bind e.g. ":7443".
+tls_cert = ""
+tls_key = ""

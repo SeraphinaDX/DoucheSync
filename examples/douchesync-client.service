@@ -1,0 +1,14 @@
+[Unit]
+Description=DoucheSync peer folder client
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/DoucheSync client
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=default.target

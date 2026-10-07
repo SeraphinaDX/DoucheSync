@@ -1,0 +1,7 @@
+/DoucheSync
+/DoucheSync.exe
+/dist/
+*.log
+/bin/
+*.zip
+__pycache__/

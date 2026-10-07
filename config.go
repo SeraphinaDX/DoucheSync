@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.1.3"
+const version = "0.2.0"
 const maxManifestBytes = 64 << 20
 const maxEntries = 100000
 
@@ -41,6 +41,8 @@ type ClientConfig struct {
 	IdentityDir        string `toml:"identity_dir"`
 	Listen             string `toml:"listen"`
 	AdvertiseURL       string `toml:"advertise_url"`
+	AdvertiseInterface string `toml:"advertise_interface"`
+	NATTraversal       bool   `toml:"nat_traversal"`
 	DiscoveryURL       string `toml:"discovery_url"`
 	DiscoveryToken     string `toml:"discovery_token"`
 	AllowHTTPDiscovery bool   `toml:"allow_http_discovery"`
@@ -142,8 +144,16 @@ func readConfig(name, mode string) (Config, error) {
 	if c.Client.Listen == "" {
 		c.Client.Listen = ":7444"
 	}
-	if err = endpoint(c.Client.AdvertiseURL, "https"); err != nil {
+	if _, _, err = splitListen(c.Client.Listen); err != nil {
 		return c, err
+	}
+	if !automaticAddress(c.Client.AdvertiseURL) {
+		if err = endpoint(c.Client.AdvertiseURL, "https"); err != nil {
+			return c, err
+		}
+		if c.Client.NATTraversal {
+			return c, errors.New("nat_traversal requires automatic advertise_url (omit it or set it to 'auto')")
+		}
 	}
 	c.Client.AdvertiseURL = strings.TrimRight(c.Client.AdvertiseURL, "/")
 	u, err := url.Parse(c.Client.DiscoveryURL)

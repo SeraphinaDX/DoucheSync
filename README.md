@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.1.3 synchronizes files in one or more folders directly between
+DoucheSync 0.2.0 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -20,6 +20,8 @@ secrets** determine which folders synchronize.
 ## What this release includes
 
 - Multiple independent folders with separate shared secrets.
+- Automatic local address selection, optional interface selection, and IP refresh.
+- Optional NAT-PMP/UPnP TCP port mapping with signed LAN/WAN endpoint alternatives.
 - Automatic bidirectional polling, offline edits, and persistent version history.
 - TLS 1.3 peer connections with authenticated certificate pinning.
 - SHA-256 verification, streamed downloads, and temporary files before replacement.
@@ -37,14 +39,82 @@ addresses on the same network, routable public addresses with forwarded TCP
 ports, or VPN addresses such as those on a WireGuard network. Each client must
 allow incoming TCP connections on its configured peer port (7444 by default).
 
-The discovery server does not provide automatic NAT traversal, UDP hole
-punching, UPnP, or relaying. Registering an address cannot make an unreachable
-machine reachable. For machines behind different routers, a VPN is the easiest
-way to give all clients direct routes. Do not use a LAN address to advertise
-to clients outside that LAN unless they can route to it.
+Clients can request NAT-PMP or UPnP router port mappings automatically (see
+below). The discovery server remains a directory: it never proxies or relays
+file traffic. Routers must support and allow the mapping protocol, and the
+client's OS firewall must allow its TCP peer port. CGNAT, double NAT, and routers
+that refuse mappings can still require a VPN or manual forwarding. This release
+does not implement STUN/ICE, UDP/TCP hole punching, PCP, or a relay fallback.
 
 Only the discovery HTTPS port needs to be public on the VPS. File traffic goes
 between the clients. The VPS does not need access to the client folders.
+
+## Automatic addresses and NAT traversal
+
+For ordinary LAN use, omit `advertise_url` or set it to `"auto"`. Keep a wildcard
+listener so it can accept traffic after DHCP or network changes:
+
+```toml
+[client]
+device_id = "desktop"       # keep your existing ID
+listen = ":7444"            # no machine IP needed
+advertise_url = "auto"      # optional: automatic is the default
+nat_traversal = true        # optional; defaults to false
+discovery_url = "https://sync.example.com"
+discovery_token = "YOUR_EXISTING_DISCOVERY_TOKEN"
+```
+
+Keep your existing folder IDs, paths, secrets, and `.douchesync` history.
+If `listen` previously contained a machine IP, replace it with `":7444"`.
+Existing explicit `advertise_url` settings still work and override detection;
+automatic NAT mapping requires automatic advertisement.
+
+Automatic mode selects the local source IP used to reach discovery, preferring
+IPv4 when available. It respects an explicitly bound listener address and uses
+the actual listening port. If route selection is unavailable, it considers
+active interfaces and prefers private IPv4 addresses. Ambiguous interfaces
+produce an actionable error instead of guessing. For a selected LAN/VPN adapter,
+add `advertise_interface = "YOUR_INTERFACE_NAME"`; its address is still automatic.
+Router mapping prefers IPv4 because NAT-PMP and this UPnP implementation map IPv4.
+Globally scoped IPv6 endpoints are supported; automatic link-local/scoped IPv6
+advertisement is not supported.
+
+Addresses are checked on each discovery heartbeat (normally every 20 seconds).
+Wildcard listeners can continue running when the selected IP changes. A listener
+bound to a specific IP needs reconfiguration/restart when that IP disappears.
+
+With `nat_traversal = true`, the client finds the selected interface's IPv4
+default gateway, tries NAT-PMP, then UPnP IGD WANIPConnection/WANPPPConnection.
+It requests a TCP mapping for its actual peer port and learns the public address
+and assigned external port from the router. NAT-PMP mappings request one-hour
+leases; granted leases shorter than one minute are rejected. UPnP mappings request
+one-hour leases, with a permanent-lease fallback for routers that require it.
+Existing UPnP mappings belonging to another application are preserved; a different
+external port is selected if needed. Mappings are refreshed alongside discovery
+heartbeats at least once per minute and cleanup is attempted on clean shutdown.
+Permanent mappings may remain after a crash or an unreachable-router/network change.
+
+The client advertises **both** its LAN address and mapped public endpoint. Other
+clients try the alternatives with the same signed certificate pin, remember a
+working endpoint, and retry alternatives if it fails. LAN peers do not need router
+hairpin NAT. Public endpoints that disappear are withdrawn while LAN discovery
+continues. If mapping is unavailable, the client logs why and continues on the LAN.
+It never substitutes a guessed public IP or sends file traffic through discovery.
+
+To enable these features, **upgrade discovery and all participating clients to
+0.2.0 first**. Older clients cannot decode announcements containing alternative
+endpoints. Upgrade the server executable and restart its service; Caddy and its
+configuration do not need changes. No sync-history reset is required.
+
+The logs show the selected local address and, when successful:
+
+```text
+NAT traversal: public peer endpoint https://PUBLIC_IP:ASSIGNED_PORT
+```
+
+`DoucheSync diagnose` reports the registered LAN/WAN endpoints and tests each one.
+It does not request or change router mappings. An unreachable LAN endpoint with a
+working public endpoint is a successful peer diagnosis.
 
 ## Diagnose missing peers
 
@@ -178,7 +248,8 @@ cp examples/client-desktop.toml client.toml
 
 Edit `client.toml`:
 
-- Set `advertise_url` to this desktop's reachable LAN, VPN, or public address.
+- Leave `advertise_url` automatic, or set an explicit reachable LAN/VPN/public URL.
+- Optionally enable `nat_traversal = true` for compatible routers.
 - Set `discovery_url` to your HTTPS discovery hostname.
 - Set `discovery_token` to the server's token.
 - Replace the documents and photos secret placeholders with their distinct keys.
@@ -196,8 +267,8 @@ All commands use explicit `-config=...` syntax. Put options after `client`,
 
 ### 4. Configure the laptop
 
-Use `examples/client-laptop.toml`. It uses a different device ID and client
-address, but the **same discovery token, folder IDs, and folder secrets**.
+Use `examples/client-laptop.toml`. It uses a different device ID and automatically
+selects its address, with the **same discovery token, folder IDs, and folder secrets**.
 Create its local folders and start its client using the same command.
 
 Add a file to either shared folder. It should appear on the other machine
@@ -218,7 +289,9 @@ Folder roots must exist and must not overlap or contain one another.
 [client]
 device_id = "desktop"                     # unique and stable on this machine
 listen = ":7444"                          # local incoming peer listener
-advertise_url = "https://10.8.0.2:7444"    # address OTHER peers can reach
+advertise_url = "auto"                    # optional; auto is the default
+# advertise_interface = "enp3s0"          # optional preferred adapter
+nat_traversal = false                     # true enables NAT-PMP/UPnP mapping
 discovery_url = "https://sync.example.com"
 discovery_token = "YOUR_RANDOM_DISCOVERY_KEY"
 scan_interval = "10s"                     # 1s through 24h
@@ -322,13 +395,16 @@ remove the lock file to bypass a running client.
   the signature and the peer's certificate fingerprint. Peer certificates
   are generated automatically on first startup and saved for reuse; no CA
   setup or manually supplied certificates are needed for peers.
+- LAN and WAN endpoint alternatives are covered by that signature and use the
+  same certificate pin. UPnP descriptions/control URLs are restricted to the
+  selected default gateway; redirects and off-router URLs are rejected.
 - Peer requests are authenticated with HMAC, timestamped, and replay-checked.
   Keep machine clocks reasonably aligned (within about one minute).
 - Files are SHA-256 checked before installation. Unsafe paths and symlinks
   are rejected. Go's rooted filesystem API confines file access to a root.
 - The server sees device/network metadata and opaque room identifiers. Use
   HTTPS for discovery to protect its bearer token and peer registry in transit.
-- This is a first release with automated tests, not an independently audited
+- This is early software with automated tests, not an independently audited
   synchronization system. Start with a backed-up test folder.
 
 ## Linux services

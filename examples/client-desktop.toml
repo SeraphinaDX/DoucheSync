@@ -1,8 +1,11 @@
 [client]
 device_id = "desktop"
 listen = ":7444"
-# The address OTHER CLIENTS can reach, not the discovery server's address.
-advertise_url = "https://192.168.1.10:7444"
+# Automatically select this client's LAN address. Can also be omitted.
+advertise_url = "auto"
+# Optional router TCP port mapping for peers outside your LAN.
+nat_traversal = false
+# advertise_interface = "enp3s0" # optional preferred LAN/VPN adapter
 discovery_url = "https://sync.example.com"
 discovery_token = "REPLACE_WITH_DISCOVERY_KEY_FROM_KEYGEN"
 scan_interval = "10s"

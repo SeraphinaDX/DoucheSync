@@ -1,8 +1,8 @@
-# Validation for DoucheSync 0.1.3
+# Validation for DoucheSync 0.2.0
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 
-- All 28 automated Go tests pass locally on Linux, including the race detector.
+- All 42 automated Go tests pass locally on Linux, including the race detector.
 - `go vet -buildvcs=false ./...` passes.
 - Three separate client processes and one discovery server pass the process smoke test.
 - Initial files, remote updates, and enabled deletions converge across all three clients.
@@ -30,4 +30,18 @@ authenticated peer reachability, retain certificate pin checks, and reject
 untrusted announcements. A diagnostic alongside running clients leaves their
 folder files, identities, and registration leases unchanged and prints no secrets.
 
-See README.md for current limits, setup, and the one-time 0.1.0 upgrade steps.
+Network tests use local UDP/HTTP router simulators. They exercise NAT-PMP public
+address queries, TCP mapping packets, assigned ports, renewal, port-specific
+deletion, private/CGNAT WAN rejection, SSDP, UPnP device descriptions, SOAP mapping
+creation/renewal/deletion, permanent-only routers, occupied ports, ownership checks,
+and unsafe/redirected router URL rejection. Manager tests cover retry intervals,
+network changes, and cleanup. Other tests cover automatic addresses and allocated
+ports, LAN sync with WAN advertisements, failed-WAN withdrawal, signed alternative
+endpoint tampering, pinned endpoint fallback, and cached endpoint preference.
+
+Actual consumer router hardware, CGNAT hole punching, and PCP have not been tested
+or implemented. NAT traversal in this release means NAT-PMP/UPnP router mapping;
+it cannot guarantee connectivity through every network. macOS gateway parsing is
+tested with fixtures; macOS runtime behavior has not been tested.
+
+See README.md for current limits, setup, and upgrade steps.

@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -36,6 +37,11 @@ type Client struct {
 	mu              sync.Mutex
 	peers           map[string][]Announcement
 	peerChecks      map[string]peerCheck
+	preferred       map[string]string
+	localURL        string
+	publicURL       string
+	nat             *natManager
+	natProblem      string
 	transferTimeout time.Duration
 }
 
@@ -70,13 +76,22 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	addressCtx, addressCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	c.localURL, err = resolveAdvertiseURL(addressCtx, c.cfg, c.listener.Addr().String())
+	addressCancel()
+	if err != nil {
+		return nil, fmt.Errorf("automatic peer address: %w", err)
+	}
+	if c.cfg.NATTraversal {
+		c.nat = &natManager{owner: "DoucheSync-" + c.cfg.DeviceID + "-" + c.fingerprint[:12]}
+	}
 	go func() {
 		err := c.server.Serve(tls.NewListener(c.listener, c.server.TLSConfig))
 		if err != nil && err != http.ErrServerClosed {
 			log.Printf("peer server: %v", err)
 		}
 	}()
-	log.Printf("device %s listening on %s; advertised as %s", c.cfg.DeviceID, c.listener.Addr(), c.cfg.AdvertiseURL)
+	log.Printf("device %s listening on %s; advertised as %s", c.cfg.DeviceID, c.listener.Addr(), c.localURL)
 	ok = true
 	return c, nil
 }
@@ -89,6 +104,13 @@ func (c *Client) Close() {
 	}
 	if c.listener != nil {
 		c.listener.Close()
+	}
+	if c.nat != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := c.nat.close(ctx); err != nil {
+			log.Printf("NAT mapping cleanup: %v", err)
+		}
+		cancel()
 	}
 	for _, f := range c.folders {
 		f.Close()
@@ -194,14 +216,50 @@ func decodeLimited(resp *http.Response, limit int64, v any) error {
 // PollDiscovery updates one room at a time. Successfully verified addresses
 // remain cached during a discovery outage; the server is never a data relay.
 func (c *Client) PollDiscovery(ctx context.Context) error {
+	addressCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	localURL, err := resolveAdvertiseURL(addressCtx, c.cfg, c.listener.Addr().String())
+	cancel()
+	if err != nil {
+		return fmt.Errorf("select peer address: %w", err)
+	}
+	if localURL != c.localURL {
+		log.Printf("local peer address changed: %s -> %s", c.localURL, localURL)
+		c.localURL = localURL
+	}
+	var alternatives []string
+	if c.nat != nil {
+		natCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+		publicURL, err := c.nat.ensure(natCtx, localURL)
+		cancel()
+		problem := ""
+		if err != nil {
+			problem = err.Error()
+			if problem != c.natProblem {
+				log.Printf("NAT traversal unavailable: %s; continuing with LAN address", problem)
+			}
+		} else if c.natProblem != "" {
+			log.Printf("NAT traversal recovered")
+		}
+		c.natProblem = problem
+		if publicURL != "" && publicURL != localURL {
+			alternatives = []string{publicURL}
+			if publicURL != c.publicURL {
+				log.Printf("NAT traversal: public peer endpoint %s", publicURL)
+			}
+		}
+		c.publicURL = publicURL
+	}
 	var errs []error
 	for room, f := range c.folders {
-		a := Announcement{Room: room, Device: c.cfg.DeviceID, URL: c.cfg.AdvertiseURL, Fingerprint: c.fingerprint, Expires: time.Now().Add(120 * time.Second).Unix()}
+		a := Announcement{Room: room, Device: c.cfg.DeviceID, URL: localURL, URLs: alternatives, Fingerprint: c.fingerprint, Expires: time.Now().Add(120 * time.Second).Unix()}
 		a.Proof = mac(f.cfg.Secret, a.signingData())
 		b, _ := json.Marshal(a)
 		r, err := c.discoveryRequest(ctx, http.MethodPost, "/v1/peers", bytes.NewReader(b))
 		if err == nil {
 			err = requireStatus(r, 204)
+			if r.StatusCode == 400 && len(alternatives) != 0 && r.Header.Get("X-DoucheSync-Version") == "" {
+				err = fmt.Errorf("%w; multiple peer endpoints require upgrading the discovery server to 0.2.0 or newer", err)
+			}
 			r.Body.Close()
 		}
 		if err != nil {
@@ -243,15 +301,20 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 		}
 		for _, p := range accepted {
 			old, known := previous[p.Device]
-			if !known || old.URL != p.URL || old.Fingerprint != p.Fingerprint {
+			if !known || old.URL != p.URL || !slices.Equal(old.URLs, p.URLs) || old.Fingerprint != p.Fingerprint {
 				log.Printf("[%s] discovered peer %s at %s", f.cfg.ID, p.Device, p.URL)
+				for _, u := range p.URLs {
+					log.Printf("[%s] peer %s alternative endpoint: %s", f.cfg.ID, p.Device, u)
+				}
 				delete(c.peerChecks, room+"/"+p.Device)
+				delete(c.preferred, room+"/"+p.Device)
 			}
 		}
 		for _, p := range c.peers[room] {
 			if !seen[p.Device] {
 				log.Printf("[%s] peer %s no longer advertised by discovery", f.cfg.ID, p.Device)
 				delete(c.peerChecks, room+"/"+p.Device)
+				delete(c.preferred, room+"/"+p.Device)
 			}
 		}
 		c.peers[room] = accepted
@@ -316,7 +379,7 @@ func (c *Client) reportPeerCheck(room, folderID string, a Announcement, err erro
 	// completed check of an old endpoint as the status of its replacement.
 	current := false
 	for _, p := range c.peers[room] {
-		if p.Device == a.Device && p.URL == a.URL && p.Fingerprint == a.Fingerprint {
+		if p.Device == a.Device && p.URL == a.URL && slices.Equal(p.URLs, a.URLs) && p.Fingerprint == a.Fingerprint {
 			current = true
 			break
 		}
@@ -331,7 +394,11 @@ func (c *Client) reportPeerCheck(room, folderID string, a Announcement, err erro
 	old, known := c.peerChecks[key]
 	known = known && old.url == a.URL && old.fingerprint == a.Fingerprint
 	if err == nil && (!known || !old.ok) {
-		log.Printf("[%s] peer %s reachable at %s; sync check complete", folderID, a.Device, a.URL)
+		endpoint := c.preferred[key]
+		if endpoint == "" {
+			endpoint = a.URL
+		}
+		log.Printf("[%s] peer %s reachable at %s; sync check complete", folderID, a.Device, endpoint)
 	} else if err != nil && known && old.ok {
 		log.Printf("[%s] sync check with peer %s failed; retrying", folderID, a.Device)
 	}
@@ -339,19 +406,11 @@ func (c *Client) reportPeerCheck(room, folderID string, a Announcement, err erro
 }
 
 func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error {
-	h := pinnedClient(a, c.transferTimeout)
-	resp, err := peerGET(ctx, h, a, f, "/v1/manifest?room="+roomID(f.cfg))
+	h, selected, remote, err := c.fetchPeerManifest(ctx, f, a)
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	if err = requireStatus(resp, 200); err != nil {
-		return err
-	}
-	var remote map[string]Entry
-	if err = decodeLimited(resp, maxManifestBytes, &remote); err != nil {
-		return err
-	}
+	defer h.CloseIdleConnections()
 	if remote == nil || len(remote) > maxEntries {
 		return errors.New("invalid manifest")
 	}
@@ -366,6 +425,12 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 			return errors.New("peer sent a local-only missing record")
 		}
 	}
+	c.mu.Lock()
+	if c.preferred == nil {
+		c.preferred = map[string]string{}
+	}
+	c.preferred[roomID(f.cfg)+"/"+a.Device] = selected.URL
+	c.mu.Unlock()
 	var errs []error
 	for _, p := range sortedPaths(remote) {
 		if f.ignored(p) {
@@ -375,11 +440,48 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 		if r.Deleted && !f.cfg.SyncDeletes {
 			continue
 		}
-		if err = c.applyEntry(ctx, h, a, f, p, r); err != nil {
+		if err = c.applyEntry(ctx, h, selected, f, p, r); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", p, err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (c *Client) fetchPeerManifest(ctx context.Context, f *Folder, a Announcement) (*http.Client, Announcement, map[string]Entry, error) {
+	urls := a.endpoints()
+	c.mu.Lock()
+	preferred := c.preferred[roomID(f.cfg)+"/"+a.Device]
+	c.mu.Unlock()
+	for i, u := range urls {
+		if u == preferred {
+			urls[0], urls[i] = urls[i], urls[0]
+			break
+		}
+	}
+	var errs []error
+	for _, u := range urls {
+		if ctx.Err() != nil {
+			return nil, a, nil, ctx.Err()
+		}
+		selected := a
+		selected.URL = u
+		h := pinnedClient(selected, c.transferTimeout)
+		resp, err := peerGET(ctx, h, selected, f, "/v1/manifest?room="+roomID(f.cfg))
+		var remote map[string]Entry
+		if err == nil {
+			err = requireStatus(resp, 200)
+			if err == nil {
+				err = decodeLimited(resp, maxManifestBytes, &remote)
+			}
+			resp.Body.Close()
+		}
+		if err == nil {
+			return h, selected, remote, nil
+		}
+		h.CloseIdleConnections()
+		errs = append(errs, fmt.Errorf("endpoint %s: %w", u, err))
+	}
+	return nil, a, nil, errors.Join(errs...)
 }
 func downloadEntry(ctx context.Context, h *http.Client, a Announcement, f *Folder, p string, e Entry) (string, error) {
 	q := url.Values{"room": {roomID(f.cfg)}, "path": {p}, "hash": {e.Hash}}

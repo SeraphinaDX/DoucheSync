@@ -75,14 +75,13 @@ def main():
                 root.mkdir()
                 folders.append(root)
                 (root / f"origin-{i}.txt").write_text(f"hello from machine {i}")
-                peer_port = address()
                 cfg = work / f"client-{i}.toml"
                 # JSON-escaped string literals also work as TOML basic strings.
                 cfg.write_text(
                     f'[client]\ndevice_id = "machine-{i}"\n'
                     f'identity_dir = {json.dumps(str(work / "identities"))}\n'
-                    f'listen = "127.0.0.1:{peer_port}"\n'
-                    f'advertise_url = "https://127.0.0.1:{peer_port}"\n'
+                    'listen = "127.0.0.1:0"\n'
+                    # Omitted advertisement selects the actual bound address/port.
                     f'discovery_url = "http://127.0.0.1:{port}"\n'
                     f'discovery_token = "{token}"\nallow_http_discovery = true\n'
                     'scan_interval = "1s"\ntransfer_timeout = "30s"\n'

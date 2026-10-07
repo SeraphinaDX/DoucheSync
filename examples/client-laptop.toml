@@ -1,7 +1,9 @@
 [client]
 device_id = "laptop"
 listen = ":7444"
-advertise_url = "https://192.168.1.20:7444"
+advertise_url = "auto"
+nat_traversal = false # true enables automatic NAT-PMP/UPnP TCP port mapping
+# advertise_interface = "wlan0" # optional preferred LAN/VPN adapter
 discovery_url = "https://sync.example.com"
 discovery_token = "REPLACE_WITH_DISCOVERY_KEY_FROM_KEYGEN"
 scan_interval = "10s"

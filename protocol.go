@@ -47,20 +47,43 @@ func roomID(f FolderConfig) string { return mac(f.Secret, "douchesync-v1-room\n"
 // The per-folder proof authenticates the endpoint AND certificate fingerprint,
 // so even an altered discovery response cannot redirect a client to an impostor.
 type Announcement struct {
-	Room        string `json:"room"`
-	Device      string `json:"device"`
-	URL         string `json:"url"`
-	Fingerprint string `json:"fingerprint"`
-	Expires     int64  `json:"expires"`
-	Proof       string `json:"proof"`
+	Room        string   `json:"room"`
+	Device      string   `json:"device"`
+	URL         string   `json:"url"`
+	URLs        []string `json:"urls,omitempty"` // signed alternative endpoints
+	Fingerprint string   `json:"fingerprint"`
+	Expires     int64    `json:"expires"`
+	Proof       string   `json:"proof"`
 }
 
 func (a Announcement) signingData() string {
-	b, _ := json.Marshal([]any{"douchesync-v1-peer", a.Room, a.Device, a.URL, a.Fingerprint, a.Expires})
+	data := []any{"douchesync-v1-peer", a.Room, a.Device, a.URL, a.Fingerprint, a.Expires}
+	if len(a.URLs) != 0 {
+		data = []any{"douchesync-v2-peer", a.Room, a.Device, a.URL, a.URLs, a.Fingerprint, a.Expires}
+	}
+	b, _ := json.Marshal(data)
 	return string(b)
 }
 func (a Announcement) verified(f FolderConfig) bool {
-	return a.Room == roomID(f) && validID.MatchString(a.Device) && endpoint(a.URL, "https") == nil && len(a.Fingerprint) == 64 && a.Expires > time.Now().Unix() && a.Expires <= time.Now().Add(3*time.Minute).Unix() && macEqual(a.Proof, mac(f.Secret, a.signingData()))
+	return a.Room == roomID(f) && validID.MatchString(a.Device) && a.validEndpoints() && len(a.Fingerprint) == 64 && a.Expires > time.Now().Unix() && a.Expires <= time.Now().Add(3*time.Minute).Unix() && macEqual(a.Proof, mac(f.Secret, a.signingData()))
+}
+
+func (a Announcement) endpoints() []string {
+	return append([]string{a.URL}, a.URLs...)
+}
+
+func (a Announcement) validEndpoints() bool {
+	if len(a.URLs) > 3 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, u := range a.endpoints() {
+		if endpoint(u, "https") != nil || seen[u] {
+			return false
+		}
+		seen[u] = true
+	}
+	return true
 }
 func peerCertificate() (tls.Certificate, string, error) {
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
@@ -94,6 +117,11 @@ func pinnedClient(a Announcement, timeout time.Duration) *http.Client {
 			return nil
 		},
 	}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, DisableKeepAlives: true}
+	if len(a.URLs) != 0 {
+		tr.DialContext = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
+		tr.TLSHandshakeTimeout = 3 * time.Second
+		tr.ResponseHeaderTimeout = 10 * time.Second
+	}
 	return &http.Client{Transport: tr, Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("peer redirects are forbidden") }}
 }
 func signRequest(req *http.Request, secret string) {

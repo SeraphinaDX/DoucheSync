@@ -32,6 +32,7 @@ func NewDiscovery(cfg ServerConfig) *Discovery {
 }
 func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-DoucheSync-Version", version)
 	if !hmac.Equal([]byte(r.Header.Get("Authorization")), []byte("Bearer "+d.cfg.Token)) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
@@ -66,7 +67,7 @@ func (d *Discovery) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, he := hex.DecodeString(a.Fingerprint)
 		_, re := hex.DecodeString(a.Room)
 		_, pe := hex.DecodeString(a.Proof)
-		if !validID.MatchString(a.Device) || endpoint(a.URL, "https") != nil || len(a.Room) != 64 || len(a.Fingerprint) != 64 || len(a.Proof) != 64 || he != nil || re != nil || pe != nil || a.Expires <= now.Unix() || a.Expires > now.Add(3*time.Minute).Unix() {
+		if !validID.MatchString(a.Device) || !a.validEndpoints() || len(a.Room) != 64 || len(a.Fingerprint) != 64 || len(a.Proof) != 64 || he != nil || re != nil || pe != nil || a.Expires <= now.Unix() || a.Expires > now.Add(3*time.Minute).Unix() {
 			http.Error(w, "invalid announcement", 400)
 			return
 		}

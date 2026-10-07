@@ -57,6 +57,10 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, err
 	}
 	cfg.Client.ParallelTransfers = workers
+	cfg.Client.ParallelDeletes, err = parallelDeletes(cfg.Client.ParallelDeletes)
+	if err != nil {
+		return nil, err
+	}
 	identity, err := openPeerIdentity(cfg.Client)
 	if err != nil {
 		return nil, err
@@ -98,7 +102,7 @@ func NewClient(cfg Config) (*Client, error) {
 		}
 	}()
 	log.Printf("device %s listening on %s; advertised as %s", c.cfg.DeviceID, c.listener.Addr(), c.localURL)
-	log.Printf("parallel downloads: %d", c.cfg.ParallelTransfers)
+	log.Printf("parallel downloads: %d; parallel deletions: %d", c.cfg.ParallelTransfers, c.cfg.ParallelDeletes)
 	ok = true
 	return c, nil
 }
@@ -441,7 +445,7 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 	c.preferred[roomID(f.cfg)+"/"+a.Device] = selected.URL
 	c.mu.Unlock()
 	var paths []string
-	var deleteErrs []error
+	var deletePaths []string
 	// Tombstones require no file download. Apply them before any slow network
 	// pulls from this peer, and checkpoint their small durable history records
 	// once at the end of the phase (or periodically during a large batch).
@@ -453,15 +457,32 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 			paths = append(paths, p)
 			continue
 		}
-		if ctx.Err() != nil {
-			break
-		}
 		if f.cfg.SyncDeletes {
-			if err := c.applyEntry(ctx, h, selected, f, p, remote[p]); err != nil {
-				deleteErrs = append(deleteErrs, fmt.Errorf("%s: %w", p, err))
-			}
+			deletePaths = append(deletePaths, p)
 		}
 	}
+	// A completed tombstone needs no IO. The cycle's full scan will detect
+	// recreations as new local edits, rather than deleting them a second time.
+	f.mu.Lock()
+	pending := deletePaths[:0]
+	for _, p := range deletePaths {
+		l, known := f.state.Entries[p]
+		relation := compareClock(l.Clock, remote[p].Clock)
+		if f.healthy && known && l.Deleted && !l.Missing && (relation == 0 || relation == 1) {
+			continue
+		}
+		pending = append(pending, p)
+	}
+	f.mu.Unlock()
+	deletePaths = pending
+	deleteWorkers, _ := parallelDeletes(c.cfg.ParallelDeletes)
+	started := time.Now()
+	if len(deletePaths) != 0 {
+		log.Printf("[%s] preparing %d deletions with %d workers", f.cfg.ID, len(deletePaths), min(deleteWorkers, len(deletePaths)))
+	}
+	deleteErrs := runFileJobs(ctx, deletePaths, deleteWorkers, func(p string) error {
+		return c.applyDeletion(ctx, selected, f, p, remote[p])
+	})
 	f.mu.Lock()
 	if f.pendingUpdates != 0 {
 		if err := f.saveLocked(); err != nil {
@@ -469,40 +490,13 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 		}
 	}
 	f.mu.Unlock()
-	// Fixed workers and an unbuffered queue bound active transfers and avoid
-	// creating a goroutine (or buffering file contents) for every manifest entry.
+	if len(deletePaths) != 0 {
+		log.Printf("[%s] deletion check: %d paths, %d workers, %s", f.cfg.ID, len(deletePaths), min(deleteWorkers, len(deletePaths)), time.Since(started).Round(time.Millisecond))
+	}
 	workers, _ := parallelTransfers(c.cfg.ParallelTransfers)
-	workers = min(workers, len(paths))
-	errs := make([]error, len(paths))
-	jobs := make(chan int)
-	var wg sync.WaitGroup
-	for range workers {
-		wg.Go(func() {
-			for i := range jobs {
-				if ctx.Err() != nil {
-					continue
-				}
-				p := paths[i]
-				r := remote[p]
-				if f.ignored(p) || (r.Deleted && !f.cfg.SyncDeletes) {
-					continue
-				}
-				if err := c.applyEntry(ctx, h, selected, f, p, r); err != nil {
-					errs[i] = fmt.Errorf("%s: %w", p, err)
-				}
-			}
-		})
-	}
-queue:
-	for i := range paths {
-		select {
-		case jobs <- i:
-		case <-ctx.Done():
-			break queue
-		}
-	}
-	close(jobs)
-	wg.Wait()
+	errs := runFileJobs(ctx, paths, workers, func(p string) error {
+		return c.applyEntry(ctx, h, selected, f, p, remote[p])
+	})
 	return errors.Join(append(append(deleteErrs, errs...), ctx.Err())...)
 }
 
@@ -582,6 +576,9 @@ func downloadEntry(ctx context.Context, h *http.Client, a Announcement, f *Folde
 	return name, nil
 }
 func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement, f *Folder, p string, r Entry) error {
+	if r.Deleted {
+		return c.applyDeletion(ctx, a, f, p, r)
+	}
 	// Refresh the destination before deciding, and again after the network
 	// transfer. A change made while downloading is never knowingly overwritten.
 	f.mu.Lock()
@@ -615,39 +612,32 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 			}
 			l.Conflicted = l.Conflicted || r.Conflicted
 			f.state.Entries[p] = l
-			err := f.persistEntryLocked(p, r.Deleted)
+			err := f.saveLocked()
 			f.mu.Unlock()
 			return err
 		}
 	}
-	tmp := ""
-	var err error
-	if !r.Deleted {
+	f.mu.Unlock()
+	tmp, err := downloadEntry(ctx, h, a, f, p, r)
+	if err != nil {
+		return err
+	}
+	defer f.root.Remove(tmp)
+	f.mu.Lock()
+	// Other workers may have committed new paths while this download ran.
+	if _, exists := f.state.Entries[p]; !exists && len(f.state.Entries) >= maxEntries {
 		f.mu.Unlock()
-		tmp, err = downloadEntry(ctx, h, a, f, p, r)
-		if err != nil {
-			return err
-		}
-		defer f.root.Remove(tmp)
-		f.mu.Lock()
-		// Other workers may have committed new paths while this download ran.
-		if _, exists := f.state.Entries[p]; !exists && len(f.state.Entries) >= maxEntries {
-			f.mu.Unlock()
-			return errors.New("folder history exceeds 100000 paths")
-		}
-		if err = f.refreshLocked(p); err != nil {
-			f.mu.Unlock()
-			return err
-		}
-		current, nowExists := f.state.Entries[p]
-		if exists != nowExists || (exists && (compareClock(current.Clock, l.Clock) != 0 || !sameContent(current, l))) {
-			f.mu.Unlock()
-			return errors.New("local file changed during transfer; deferred to next cycle")
-		}
+		return errors.New("folder history exceeds 100000 paths")
 	}
-	// A tombstone has no network gap: retain the lock and avoid hashing its
-	// destination twice. archiveLocal still verifies the retained bytes and
-	// rechecks the source immediately before deletion.
+	if err = f.refreshLocked(p); err != nil {
+		f.mu.Unlock()
+		return err
+	}
+	current, nowExists := f.state.Entries[p]
+	if !unchangedEntry(l, exists, current, nowExists) {
+		f.mu.Unlock()
+		return errors.New("local file changed during transfer; deferred to next cycle")
+	}
 	defer f.mu.Unlock()
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -702,32 +692,23 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 				return err
 			}
 		}
-		if r.Deleted {
-			if exists && !l.Deleted && !l.Missing {
-				if err = f.root.Remove(filepath.FromSlash(p)); err != nil {
-					return err
-				}
-			}
-			log.Printf("[%s] deleted %s (from %s; previous copy retained)", f.cfg.ID, p, a.Device)
-		} else {
-			if err = f.root.MkdirAll(filepath.FromSlash(filepath.Dir(p)), 0755); err != nil {
-				return err
-			}
-			if err = f.root.Chmod(tmp, os.FileMode(r.Mode)&0777); err != nil {
-				return err
-			}
-			mt := time.Unix(0, r.ModTime)
-			if err = f.root.Chtimes(tmp, mt, mt); err != nil {
-				return err
-			}
-			if err = f.root.Rename(tmp, filepath.FromSlash(p)); err != nil {
-				return err
-			}
-			log.Printf("[%s] received %s (%d bytes) from %s", f.cfg.ID, p, r.Size, a.Device)
+		if err = f.root.MkdirAll(filepath.FromSlash(filepath.Dir(p)), 0755); err != nil {
+			return err
 		}
+		if err = f.root.Chmod(tmp, os.FileMode(r.Mode)&0777); err != nil {
+			return err
+		}
+		mt := time.Unix(0, r.ModTime)
+		if err = f.root.Chtimes(tmp, mt, mt); err != nil {
+			return err
+		}
+		if err = f.root.Rename(tmp, filepath.FromSlash(p)); err != nil {
+			return err
+		}
+		log.Printf("[%s] received %s (%d bytes) from %s", f.cfg.ID, p, r.Size, a.Device)
 	}
 	f.state.Entries[p] = merged
-	return f.persistEntryLocked(p, r.Deleted)
+	return f.saveLocked()
 }
 func runClient(ctx context.Context, cfg Config, once bool) error {
 	c, err := NewClient(cfg)

@@ -11,6 +11,7 @@ discovery_token = "REPLACE_WITH_DISCOVERY_KEY_FROM_KEYGEN"
 scan_interval = "10s"
 transfer_timeout = "30m"
 parallel_transfers = 4 # simultaneous downloads; 1..32
+parallel_deletes = 4   # simultaneous recovery copies/hashes for deletes; 1..32
 allow_http_discovery = false
 
 [[folders]]

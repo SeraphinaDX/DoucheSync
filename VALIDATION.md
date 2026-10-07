@@ -1,15 +1,15 @@
-# Validation for DoucheSync 0.3.1
+# Validation for DoucheSync 0.3.2
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 
-- All 53 automated Go tests pass locally on Linux, including the race detector.
+- All 58 automated Go tests pass locally on Linux, including the race detector.
 - `go vet -buildvcs=false ./...` passes.
 - Three separate client processes and one discovery server pass the process smoke test.
 - Initial files, remote updates, and enabled deletions converge across all three clients.
 - Discovery writes no files to its working directory.
 - All processes shut down cleanly on SIGTERM.
 - Linux x86-64 binary built with CGO_ENABLED=0 and exercised in the process test.
-- Windows x86-64 binary built with CGO_ENABLED=0 by cross-compilation. Native Linux and Windows CI passed for 0.3.0; the updated suite runs on both platforms in GitHub Actions.
+- Windows x86-64 binary built with CGO_ENABLED=0 by cross-compilation. Native Linux and Windows CI passed for 0.3.1; the updated suite runs on both platforms in GitHub Actions.
 
 Coverage includes simultaneous transfers, multiple-folder isolation, persistent
 state after restart, concurrent edits, edit/delete conflicts, deletion disabled,
@@ -74,3 +74,19 @@ history records plus one checkpoint, in a 10,000-path history. This isolates
 history persistence and excludes scanning, network latency and copying retained
 file contents. Both modes fsync each mutation and produce the same final state;
 the improvement is not a claim that total deletion time improves by that factor.
+
+Actual parallel-deletion tests observe overlapping recovery temporary files,
+verify one/three worker bounds, confirm the folder lock remains available during
+copying, preserve edits made while copying, check cancellation cleanup and
+unchanged sources, and validate `parallel_deletes` TOML defaults and bounds.
+Copying and all complete content hashes for deletion now occur outside the
+shared folder lock; the final identity/stat check, removal and history commit
+hold the lock. Existing interrupted-batch and checkpoint replay tests still pass.
+
+`go test -buildvcs=false -run '^$' -bench BenchmarkParallelDeleteBatch -benchtime=3x`
+measured 149.8 ms with one worker and 45.90 ms with four, approximately 3.3 times
+faster on this local filesystem. Each batch deletes sixteen 4 MiB files, retaining
+and verifying recovery copies, fsyncing file/history writes and checkpointing the
+batch. The TLS manifest fetch is included; fixture setup and initial scanning are
+excluded. This measures the actual deletion phase, rather than history persistence
+alone. Storage hardware and competing IO will affect the result.

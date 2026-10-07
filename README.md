@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.3.1 synchronizes files in one or more folders directly between
+DoucheSync 0.3.2 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -297,6 +297,7 @@ discovery_token = "YOUR_RANDOM_DISCOVERY_KEY"
 scan_interval = "10s"                     # 1s through 24h
 transfer_timeout = "30m"                  # 1s through 24h
 parallel_transfers = 4                    # simultaneous downloads; 1..32
+parallel_deletes = 4                      # parallel deletion preparation; 1..32
 allow_http_discovery = false
 
 [[folders]]
@@ -314,15 +315,17 @@ transfers. Peer TLS connections are reused within each sync check. Folders and
 peers are checked in sequence, so the worker count is a client-wide download
 limit during normal operation. Incoming transfers have separate connections.
 Downloads stream to disk and are hash-verified; installing files and saving
-history remain serialized. Increasing the setting helps when per-file network
-latency is the bottleneck, but cannot exceed your network or disk throughput.
+history remain serialized. Increasing the download worker count helps when
+per-file network latency is the bottleneck, but cannot exceed your network or
+disk throughput. Deletion preparation has its own `parallel_deletes` worker
+limit (default 4); copying and hashing recovery versions run concurrently.
 
 Scans still hash all files, including unchanged files, and changed files are
 transferred in full. This release does not implement filesystem watching,
 block-level transfers, or parallel chunks of a single large file. Initial
 scan time and disk/history writes can still limit throughput.
 
-Version 0.3.1 is a client performance update. Stop the clients, run
+Version 0.3.2 is a client performance update. Stop the clients, run
 `git pull --ff-only` and `make build`, then restart them. Existing configurations
 get four workers without edits; keep your IDs, secrets, identity files, and
 `.douchesync` history. A 0.2.0 discovery server remains compatible.
@@ -366,11 +369,21 @@ copies are still byte-verified and retained before removing a local file.
 
 Local deletes are discovered by the normal scan, so the delay still includes
 `scan_interval` (10 seconds by default) and scan time. Large files also take
-time to retain as recovery copies. Increasing `parallel_transfers` does not
-speed up that serialized disk work. The default `sync_deletes = false` restores
+time to retain as recovery copies.
+
+Since 0.3.2, deletion preparation hashes and copies up to four independent files
+at once, outside the shared folder lock. Set `parallel_deletes` under `[client]`
+to tune this (1..32, default 4). `parallel_transfers` controls downloads separately.
+Before removal, the client rechecks version history and the source file's identity,
+size, timestamp and mode against the fully verified source. Short removal and
+history commits stay serialized; completed deletion records are skipped on later
+checks. Batch logs report the path count, worker count and elapsed time.
+Parallel IO can improve batch throughput, but the disk still has to read and
+retain the contents. Use 1 if parallel IO performs poorly on your storage.
+
+The default `sync_deletes = false` restores
 missing files instead of propagating deletion; enable it on every client for
 each folder where deletions should sync.
-
 
 When a file is edited independently on two machines, version vectors detect
 the conflict. The live version with the lexicographically greater SHA-256 hash

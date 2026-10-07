@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -358,38 +359,47 @@ func (f *Folder) snapshotLocked() map[string]Entry {
 // hashFile checks for changes during hashing. An unstable file is retried next
 // cycle; a scan failure never turns unreadable files into deletion records.
 func (f *Folder) hashFile(name string) (Entry, error) {
+	e, _, err := f.hashFileObserved(context.Background(), name)
+	return e, err
+}
+
+// The returned file identity permits a cheap final check after hashing outside
+// the folder lock. Full hashes still detect content edits, even with preserved
+// timestamps; the final identity/stat check catches replacement while waiting
+// to commit.
+func (f *Folder) hashFileObserved(ctx context.Context, name string) (Entry, os.FileInfo, error) {
 	in, err := f.root.Open(filepath.FromSlash(name))
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	defer in.Close()
 	before, err := in.Stat()
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	if !before.Mode().IsRegular() {
-		return Entry{}, errors.New("not a regular file")
+		return Entry{}, nil, errors.New("not a regular file")
 	}
 	if before.Size() > f.cfg.MaxFileSize {
-		return Entry{}, fmt.Errorf("file exceeds max_file_size: %s", name)
+		return Entry{}, nil, fmt.Errorf("file exceeds max_file_size: %s", name)
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, io.LimitReader(in, f.cfg.MaxFileSize+1))
+	n, err := io.Copy(h, io.LimitReader(contextReader{ctx: ctx, in: in}, f.cfg.MaxFileSize+1))
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	after, err := in.Stat()
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
 	current, err := f.root.Lstat(filepath.FromSlash(name))
 	if err != nil {
-		return Entry{}, err
+		return Entry{}, nil, err
 	}
-	if !os.SameFile(before, current) || n != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
-		return Entry{}, fmt.Errorf("file changed during scan: %s", name)
+	if !os.SameFile(before, current) || n != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || current.Size() != after.Size() || !current.ModTime().Equal(after.ModTime()) || current.Mode().Perm() != after.Mode().Perm() {
+		return Entry{}, nil, fmt.Errorf("file changed during scan: %s", name)
 	}
-	return Entry{Hash: hex.EncodeToString(h.Sum(nil)), Size: n, ModTime: after.ModTime().UnixNano(), Mode: uint32(after.Mode().Perm()), Clock: Clock{}}, nil
+	return Entry{Hash: hex.EncodeToString(h.Sum(nil)), Size: n, ModTime: after.ModTime().UnixNano(), Mode: uint32(after.Mode().Perm()), Clock: Clock{}}, current, nil
 }
 func (f *Folder) observeLocked(p string, live *Entry) error {
 	old, ok := f.state.Entries[p]
@@ -561,7 +571,7 @@ func sortedPaths(m map[string]Entry) []string {
 	return keys
 }
 
-// archiveLocal retains a byte-verified version before replacement/deletion.
+// archiveLocal retains a byte-verified version before replacement.
 // Archive keys include the original pathname hash and content hash, preventing
 // collisions and keeping overly long original names out of the archive paths.
 func archiveName(category, p string, e Entry) string {

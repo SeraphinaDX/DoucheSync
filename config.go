@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.3.1"
+const version = "0.3.2"
 const defaultParallelTransfers = 4
 const maxParallelTransfers = 32
 const maxManifestBytes = 64 << 20
@@ -51,6 +51,7 @@ type ClientConfig struct {
 	ScanInterval       string `toml:"scan_interval"`
 	TransferTimeout    string `toml:"transfer_timeout"`
 	ParallelTransfers  int    `toml:"parallel_transfers"`
+	ParallelDeletes    int    `toml:"parallel_deletes"`
 }
 type FolderConfig struct {
 	ID          string   `toml:"id"`
@@ -98,11 +99,17 @@ func endpoint(s string, scheme string) error {
 	return nil
 }
 func parallelTransfers(n int) (int, error) {
+	return parallelWorkers(n, "parallel_transfers")
+}
+func parallelDeletes(n int) (int, error) {
+	return parallelWorkers(n, "parallel_deletes")
+}
+func parallelWorkers(n int, key string) (int, error) {
 	if n == 0 {
 		return defaultParallelTransfers, nil
 	}
 	if n < 1 || n > maxParallelTransfers {
-		return 0, errors.New("client.parallel_transfers must be 1..32")
+		return 0, fmt.Errorf("client.%s must be 1..32", key)
 	}
 	return n, nil
 }
@@ -193,6 +200,10 @@ func readConfig(name, mode string) (Config, error) {
 		return c, err
 	}
 	c.Client.ParallelTransfers, err = parallelTransfers(c.Client.ParallelTransfers)
+	if err != nil {
+		return c, err
+	}
+	c.Client.ParallelDeletes, err = parallelDeletes(c.Client.ParallelDeletes)
 	if err != nil {
 		return c, err
 	}

@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.1.1 synchronizes files in one or more folders directly between
+DoucheSync 0.1.2 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -45,6 +45,43 @@ to clients outside that LAN unless they can route to it.
 
 Only the discovery HTTPS port needs to be public on the VPS. File traffic goes
 between the clients. The VPS does not need access to the client folders.
+
+## Diagnose missing peers
+
+Keep both clients running. In another terminal on each machine, run:
+
+```sh
+./DoucheSync diagnose
+# If the client uses an explicit config, use the same file:
+./DoucheSync diagnose -config=client.toml
+```
+
+This command only queries discovery and tests signed, certificate-pinned peer
+manifest requests. It does not register a device, acquire client locks, scan,
+download files, or change folders or saved identities. It can run alongside
+the normal client. Its output does not include tokens, folder secrets, folder paths,
+filenames, or manifest contents.
+
+Compare **Discovery** and **Discovery group** on the two machines: both must
+match. The group derives from the folder ID and secret; different groups mean
+one or both of those settings differ. **Device** IDs must differ. Avoid changing
+an existing device ID or deleting `.douchesync` history as a troubleshooting step.
+
+- HTTP 401 from discovery means the token does not match the server's token.
+- No own-device registration means the running client is not registered in this
+  group; inspect its `discovery:` errors and confirm it uses the same config.
+- An own registration with no other devices means discovery has no other verified
+  client in that group. Check the second client's registration, config, and clocks.
+- A discovered peer followed by a connection failure means the advertised endpoint
+  is unreachable; check its address, running client, routing, and TCP firewall.
+- A fingerprint mismatch means the endpoint served a different certificate from
+  its signed announcement. Check the address and device ID and use saved identities.
+- An `OK` peer result confirms pinned TLS and authentication succeeded from this
+  machine. Run the check in both directions.
+
+The normal `no matching peers discovered yet` message describes an empty peer
+list. It is not a failed reachability test. The discovery server does not need
+an upgrade for this diagnostic command.
 
 ## Build from source
 

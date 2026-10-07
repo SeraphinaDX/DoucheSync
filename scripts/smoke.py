@@ -93,6 +93,15 @@ def main():
             wait_for(lambda: all(content(root / f"origin-{i}.txt") == f"hello from machine {i}"
                                  for root in folders for i in range(3)), processes, logs,
                      "all three clients exchanged their files")
+            for i in range(3):
+                result = subprocess.run(
+                    [str(binary), "diagnose", "-config=" + str(work / f"client-{i}.toml")],
+                    capture_output=True, text=True, timeout=50)
+                if result.returncode != 0 or result.stdout.count("OK (pinned TLS") != 2:
+                    raise RuntimeError("peer diagnosis failed: " + result.stdout + result.stderr)
+                if token in result.stdout or secret in result.stdout:
+                    raise RuntimeError("peer diagnosis printed a secret")
+            print("PASS: each client diagnosed both peers alongside running clients", flush=True)
             (folders[1] / "origin-0.txt").write_text("updated on machine 1")
             wait_for(lambda: all(content(root / "origin-0.txt") == "updated on machine 1"
                                  for root in folders), processes, logs, "remote update propagated")

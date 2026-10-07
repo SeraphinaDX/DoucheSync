@@ -35,7 +35,7 @@ func run(args []string) error {
 	case "help", "-h", "--help":
 		usage()
 		return nil
-	case "server", "client", "check-config":
+	case "server", "client", "check-config", "diagnose":
 		flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 		config := flags.String("config", configPath(), "TOML configuration file")
 		once := flags.Bool("once", false, "client: scan and pull once, then exit")
@@ -50,6 +50,9 @@ func run(args []string) error {
 			return fmt.Errorf("unexpected argument %q; put options after the command", flags.Arg(0))
 		}
 		command := args[0]
+		if command == "diagnose" {
+			command = "client"
+		}
 		if command == "check-config" {
 			command = *mode
 		}
@@ -66,6 +69,10 @@ func run(args []string) error {
 		}
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
+		if args[0] == "diagnose" {
+			fmt.Printf("Config: %s\n", *config)
+			return diagnose(ctx, cfg, os.Stdout)
+		}
 		if command == "server" {
 			return runDiscovery(ctx, cfg.Server)
 		}
@@ -81,6 +88,7 @@ Usage:
   DoucheSync server -config=server.toml
   DoucheSync client -config=client.toml [-once]
   DoucheSync check-config -config=client.toml [-mode=server]
+  DoucheSync diagnose [-config=client.toml]
   DoucheSync keygen
   DoucheSync version
 

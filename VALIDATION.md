@@ -1,8 +1,8 @@
-# Validation for DoucheSync 0.1.1
+# Validation for DoucheSync 0.1.2
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 
-- All 24 automated Go tests pass locally on Linux, including the race detector.
+- All 28 automated Go tests pass locally on Linux, including the race detector.
 - `go vet -buildvcs=false ./...` passes.
 - Three separate client processes and one discovery server pass the process smoke test.
 - Initial files, remote updates, and enabled deletions converge across all three clients.
@@ -24,5 +24,10 @@ client keeps its fingerprint, accepts requests from a peer with the existing
 cached announcement, transfers files, and renews its old discovery lease.
 Additional tests cover identity locks, corrupt identities, and private-key
 file permissions. GitHub Actions also runs the suite on Windows.
+
+Diagnostic tests distinguish empty groups and bad discovery tokens, verify
+authenticated peer reachability, retain certificate pin checks, and reject
+untrusted announcements. A diagnostic alongside running clients leaves their
+folder files, identities, and registration leases unchanged and prints no secrets.
 
 See README.md for current limits, setup, and the one-time 0.1.0 upgrade steps.

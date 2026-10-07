@@ -265,7 +265,7 @@ func (c *Client) Cycle(ctx context.Context) error {
 		peers := append([]Announcement(nil), c.peers[room]...)
 		c.mu.Unlock()
 		if len(peers) == 0 {
-			log.Printf("[%s] no reachable peers discovered yet", f.cfg.ID)
+			log.Printf("[%s] no matching peers discovered yet; run DoucheSync diagnose on both clients", f.cfg.ID)
 		}
 		for _, a := range peers {
 			if ctx.Err() != nil {

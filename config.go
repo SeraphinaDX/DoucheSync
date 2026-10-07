@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.1.1"
+const version = "0.1.2"
 const maxManifestBytes = 64 << 20
 const maxEntries = 100000
 

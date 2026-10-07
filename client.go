@@ -34,6 +34,7 @@ type Client struct {
 	listener        net.Listener
 	http            *http.Client
 	guard           replayGuard
+	cycleMu         sync.Mutex // one cycle at a time keeps the worker limit client-wide
 	mu              sync.Mutex
 	peers           map[string][]Announcement
 	peerChecks      map[string]peerCheck
@@ -51,6 +52,11 @@ type peerCheck struct {
 }
 
 func NewClient(cfg Config) (*Client, error) {
+	workers, err := parallelTransfers(cfg.Client.ParallelTransfers)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Client.ParallelTransfers = workers
 	identity, err := openPeerIdentity(cfg.Client)
 	if err != nil {
 		return nil, err
@@ -92,6 +98,7 @@ func NewClient(cfg Config) (*Client, error) {
 		}
 	}()
 	log.Printf("device %s listening on %s; advertised as %s", c.cfg.DeviceID, c.listener.Addr(), c.localURL)
+	log.Printf("parallel downloads: %d", c.cfg.ParallelTransfers)
 	ok = true
 	return c, nil
 }
@@ -341,6 +348,8 @@ func peerGET(ctx context.Context, h *http.Client, a Announcement, f *Folder, uri
 	return h.Do(r)
 }
 func (c *Client) Cycle(ctx context.Context) error {
+	c.cycleMu.Lock()
+	defer c.cycleMu.Unlock()
 	var errs []error
 	for room, f := range c.folders {
 		if err := f.Scan(); err != nil {
@@ -431,20 +440,42 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 	}
 	c.preferred[roomID(f.cfg)+"/"+a.Device] = selected.URL
 	c.mu.Unlock()
-	var errs []error
-	for _, p := range sortedPaths(remote) {
-		if f.ignored(p) {
-			continue
-		}
-		r := remote[p]
-		if r.Deleted && !f.cfg.SyncDeletes {
-			continue
-		}
-		if err = c.applyEntry(ctx, h, selected, f, p, r); err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", p, err))
+	paths := sortedPaths(remote)
+	// Fixed workers and an unbuffered queue bound active transfers and avoid
+	// creating a goroutine (or buffering file contents) for every manifest entry.
+	workers, _ := parallelTransfers(c.cfg.ParallelTransfers)
+	workers = min(workers, len(paths))
+	errs := make([]error, len(paths))
+	jobs := make(chan int)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Go(func() {
+			for i := range jobs {
+				if ctx.Err() != nil {
+					continue
+				}
+				p := paths[i]
+				r := remote[p]
+				if f.ignored(p) || (r.Deleted && !f.cfg.SyncDeletes) {
+					continue
+				}
+				if err := c.applyEntry(ctx, h, selected, f, p, r); err != nil {
+					errs[i] = fmt.Errorf("%s: %w", p, err)
+				}
+			}
+		})
+	}
+queue:
+	for i := range paths {
+		select {
+		case jobs <- i:
+		case <-ctx.Done():
+			break queue
 		}
 	}
-	return errors.Join(errs...)
+	close(jobs)
+	wg.Wait()
+	return errors.Join(append(errs, ctx.Err())...)
 }
 
 func (c *Client) fetchPeerManifest(ctx context.Context, f *Folder, a Announcement) (*http.Client, Announcement, map[string]Entry, error) {
@@ -465,7 +496,7 @@ func (c *Client) fetchPeerManifest(ctx context.Context, f *Folder, a Announcemen
 		}
 		selected := a
 		selected.URL = u
-		h := pinnedClient(selected, c.transferTimeout)
+		h := pinnedClientWithLimit(selected, c.transferTimeout, c.cfg.ParallelTransfers)
 		resp, err := peerGET(ctx, h, selected, f, "/v1/manifest?room="+roomID(f.cfg))
 		var remote map[string]Entry
 		if err == nil {
@@ -573,6 +604,13 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Other workers may have committed new paths while this download ran.
+	if _, exists := f.state.Entries[p]; !exists && len(f.state.Entries) >= maxEntries {
+		return errors.New("folder history exceeds 100000 paths")
+	}
 	if err = f.refreshLocked(p); err != nil {
 		return err
 	}

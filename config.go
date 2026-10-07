@@ -19,7 +19,9 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.2.0"
+const version = "0.3.0"
+const defaultParallelTransfers = 4
+const maxParallelTransfers = 32
 const maxManifestBytes = 64 << 20
 const maxEntries = 100000
 
@@ -48,6 +50,7 @@ type ClientConfig struct {
 	AllowHTTPDiscovery bool   `toml:"allow_http_discovery"`
 	ScanInterval       string `toml:"scan_interval"`
 	TransferTimeout    string `toml:"transfer_timeout"`
+	ParallelTransfers  int    `toml:"parallel_transfers"`
 }
 type FolderConfig struct {
 	ID          string   `toml:"id"`
@@ -94,6 +97,16 @@ func endpoint(s string, scheme string) error {
 	}
 	return nil
 }
+func parallelTransfers(n int) (int, error) {
+	if n == 0 {
+		return defaultParallelTransfers, nil
+	}
+	if n < 1 || n > maxParallelTransfers {
+		return 0, errors.New("client.parallel_transfers must be 1..32")
+	}
+	return n, nil
+}
+
 func readConfig(name, mode string) (Config, error) {
 	var c Config
 	meta, err := toml.DecodeFile(name, &c)
@@ -177,6 +190,10 @@ func readConfig(name, mode string) (Config, error) {
 		return c, err
 	}
 	if _, err = duration(c.Client.TransferTimeout, 30*time.Minute); err != nil {
+		return c, err
+	}
+	c.Client.ParallelTransfers, err = parallelTransfers(c.Client.ParallelTransfers)
+	if err != nil {
 		return c, err
 	}
 	if len(c.Folders) == 0 || len(c.Folders) > 64 {

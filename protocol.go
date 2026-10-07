@@ -102,6 +102,11 @@ func peerCertificate() (tls.Certificate, string, error) {
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}, digest(der), nil
 }
 func pinnedClient(a Announcement, timeout time.Duration) *http.Client {
+	return pinnedClientWithLimit(a, timeout, defaultParallelTransfers)
+}
+
+func pinnedClientWithLimit(a Announcement, timeout time.Duration, workers int) *http.Client {
+	workers, _ = parallelTransfers(workers)
 	tr := &http.Transport{DialContext: (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext, TLSClientConfig: &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		// Normal PKI validation is replaced with a signed, exact certificate pin.
@@ -116,7 +121,7 @@ func pinnedClient(a Announcement, timeout time.Duration) *http.Client {
 			}
 			return nil
 		},
-	}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, DisableKeepAlives: true}
+	}, TLSHandshakeTimeout: 10 * time.Second, ResponseHeaderTimeout: 30 * time.Second, MaxConnsPerHost: workers, MaxIdleConnsPerHost: workers, MaxIdleConns: workers, IdleConnTimeout: 30 * time.Second}
 	if len(a.URLs) != 0 {
 		tr.DialContext = (&net.Dialer{Timeout: 2 * time.Second}).DialContext
 		tr.TLSHandshakeTimeout = 3 * time.Second

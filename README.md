@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.2.0 synchronizes files in one or more folders directly between
+DoucheSync 0.3.0 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -296,6 +296,7 @@ discovery_url = "https://sync.example.com"
 discovery_token = "YOUR_RANDOM_DISCOVERY_KEY"
 scan_interval = "10s"                     # 1s through 24h
 transfer_timeout = "30m"                  # 1s through 24h
+parallel_transfers = 4                    # simultaneous downloads; 1..32
 allow_http_discovery = false
 
 [[folders]]
@@ -306,6 +307,25 @@ sync_deletes = false
 ignore = ["*.tmp", "*.swp", ".git", "node_modules"]
 max_file_size = 10737418240               # bytes; default 10 GiB
 ```
+
+Clients download up to four files simultaneously by default. Set
+`parallel_transfers` under `[client]` to tune this (1..32); use 1 for sequential
+transfers. Peer TLS connections are reused within each sync check. Folders and
+peers are checked in sequence, so the worker count is a client-wide download
+limit during normal operation. Incoming transfers have separate connections.
+Downloads stream to disk and are hash-verified; installing files and saving
+history remain serialized. Increasing the setting helps when per-file network
+latency is the bottleneck, but cannot exceed your network or disk throughput.
+
+Scans still hash all files, including unchanged files, and changed files are
+transferred in full. This release does not implement filesystem watching,
+block-level transfers, or parallel chunks of a single large file. Initial
+scan time and disk/history writes can still limit throughput.
+
+Version 0.3.0 is a client performance update. Stop the clients, run
+`git pull --ff-only` and `make build`, then restart them. Existing configurations
+get four workers without edits; keep your IDs, secrets, identity files, and
+`.douchesync` history. A 0.2.0 discovery server remains compatible.
 
 Keys must contain at least 32 characters. Generate real keys with `keygen`;
 placeholder strings are not secure keys. Unknown TOML settings are rejected

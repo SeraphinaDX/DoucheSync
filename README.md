@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.1.0 synchronizes files in one or more folders directly between
+DoucheSync 0.1.1 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -237,10 +237,22 @@ Do not reset it as routine cleanup. Do not copy it from one machine to another,
 and do not change device IDs or folder secrets on initialized roots without a
 planned history reset. Missing or mismatched history causes startup to stop.
 
-After an ungraceful exit, discovery may retain the previous certificate's
-registration until its lease expires (normally 90 seconds). The new client
-logs a device-ID registration conflict and retries. If it persists, check
-that another running machine is not using the same device ID.
+Peer certificates and private keys are generated automatically and saved to
+`identity/<device_id>.pem` inside the user configuration directory, normally
+`~/.config/douchesync/identity/` on Linux. An optional `[client] identity_dir`
+setting changes that location. Keep the saved identity on its original
+machine; do not share or synchronize it. Unix private-key files use mode 0600.
+
+Normal restarts reuse the same certificate, so cached peers and discovery
+leases remain valid. A damaged saved identity stops startup rather than
+silently replacing the certificate. An OS lock prevents two local clients
+from using the same saved device identity at once.
+
+When upgrading from 0.1.0 to 0.1.1, stop the old clients first, rebuild both,
+and restart discovery once to clear the old in-memory certificates. The new
+clients create their saved identities automatically. Folder configuration and
+`.douchesync` history need no changes. Deliberately replacing an identity may
+also require discovery to forget its old lease (normally 90 seconds).
 
 If you bootstrap folders using another copy tool, **exclude `.douchesync`**.
 The folder lock is released automatically even if the process crashes; do not
@@ -254,7 +266,8 @@ remove the lock file to bypass a running client.
   `chmod 600 client.toml server.toml` on Linux.
 - Peer advertisements are signed with the folder secret. Clients check both
   the signature and the peer's certificate fingerprint. Peer certificates
-  are generated automatically on startup; no CA setup is needed for peers.
+  are generated automatically on first startup and saved for reuse; no CA
+  setup or manually supplied certificates are needed for peers.
 - Peer requests are authenticated with HMAC, timestamped, and replay-checked.
   Keep machine clocks reasonably aligned (within about one minute).
 - Files are SHA-256 checked before installation. Unsafe paths and symlinks

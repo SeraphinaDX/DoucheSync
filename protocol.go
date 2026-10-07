@@ -84,8 +84,12 @@ func pinnedClient(a Announcement, timeout time.Duration) *http.Client {
 		// Normal PKI validation is replaced with a signed, exact certificate pin.
 		InsecureSkipVerify: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
-			if len(cs.PeerCertificates) == 0 || !macEqual(digest(cs.PeerCertificates[0].Raw), a.Fingerprint) {
-				return errors.New("peer certificate fingerprint mismatch")
+			if len(cs.PeerCertificates) == 0 {
+				return errors.New("peer did not present a certificate")
+			}
+			actual := digest(cs.PeerCertificates[0].Raw)
+			if !macEqual(actual, a.Fingerprint) {
+				return fmt.Errorf("peer certificate fingerprint mismatch for %s at %s (discovery: %s; received: %s); check advertise_url and device_id", a.Device, a.URL, a.Fingerprint, actual)
 			}
 			return nil
 		},

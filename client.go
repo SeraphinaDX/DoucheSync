@@ -28,6 +28,7 @@ type Client struct {
 	cfg             ClientConfig
 	folders         map[string]*Folder // keyed by opaque room identifier
 	fingerprint     string
+	identity        *PeerIdentity
 	server          *http.Server
 	listener        net.Listener
 	http            *http.Client
@@ -38,12 +39,12 @@ type Client struct {
 }
 
 func NewClient(cfg Config) (*Client, error) {
-	cert, fp, err := peerCertificate()
+	identity, err := openPeerIdentity(cfg.Client)
 	if err != nil {
 		return nil, err
 	}
 	timeout, _ := duration(cfg.Client.TransferTimeout, 30*time.Minute)
-	c := &Client{cfg: cfg.Client, folders: map[string]*Folder{}, fingerprint: fp, peers: map[string][]Announcement{}, transferTimeout: timeout}
+	c := &Client{cfg: cfg.Client, folders: map[string]*Folder{}, fingerprint: identity.Fingerprint, identity: identity, peers: map[string][]Announcement{}, transferTimeout: timeout}
 	c.http = &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("discovery redirects are forbidden") }}
 	ok := false
 	defer func() {
@@ -58,7 +59,7 @@ func NewClient(cfg Config) (*Client, error) {
 		}
 		c.folders[roomID(fc)] = f
 	}
-	c.server = &http.Server{Handler: c, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{cert}}}
+	c.server = &http.Server{Handler: c, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity.Certificate}}}
 	c.listener, err = net.Listen("tcp", c.cfg.Listen)
 	if err != nil {
 		return nil, err
@@ -86,6 +87,7 @@ func (c *Client) Close() {
 	for _, f := range c.folders {
 		f.Close()
 	}
+	c.identity.Close()
 }
 func (c *Client) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")

@@ -1,8 +1,8 @@
-# Validation for DoucheSync 0.1.0
+# Validation for DoucheSync 0.1.1
 
 Built on Linux x86-64 with Go 1.27.1 on 2026-10-07.
 
-- All 20 automated Go tests pass, including the race detector.
+- All 24 automated Go tests pass locally on Linux, including the race detector.
 - `go vet -buildvcs=false ./...` passes.
 - Three separate client processes and one discovery server pass the process smoke test.
 - Initial files, remote updates, and enabled deletions converge across all three clients.
@@ -18,4 +18,11 @@ announcement tampering, path traversal, symlinks, invalid transfers,
 edits during download, ignore rules, folder locks, missing/failed state storage,
 scan failure behavior, and TOML validation.
 
-This is an initial release. See README.md for current limits and setup.
+The restart regression test reproduced `remote error: tls: bad certificate`
+and a peer fingerprint mismatch on 0.1.0. With saved identities, a restarted
+client keeps its fingerprint, accepts requests from a peer with the existing
+cached announcement, transfers files, and renews its old discovery lease.
+Additional tests cover identity locks, corrupt identities, and private-key
+file permissions. GitHub Actions also runs the suite on Windows.
+
+See README.md for current limits, setup, and the one-time 0.1.0 upgrade steps.

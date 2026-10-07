@@ -19,7 +19,7 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 const maxManifestBytes = 64 << 20
 const maxEntries = 100000
 
@@ -38,6 +38,7 @@ type ServerConfig struct {
 }
 type ClientConfig struct {
 	DeviceID           string `toml:"device_id"`
+	IdentityDir        string `toml:"identity_dir"`
 	Listen             string `toml:"listen"`
 	AdvertiseURL       string `toml:"advertise_url"`
 	DiscoveryURL       string `toml:"discovery_url"`
@@ -133,6 +134,10 @@ func readConfig(name, mode string) (Config, error) {
 	}
 	if !validID.MatchString(c.Client.DeviceID) {
 		return c, errors.New("client.device_id must be 1..64 letters, digits, underscores or hyphens, unique per machine")
+	}
+	c.Client.IdentityDir, err = identityPath(c.Client)
+	if err != nil {
+		return c, fmt.Errorf("client identity directory: %w", err)
 	}
 	if c.Client.Listen == "" {
 		c.Client.Listen = ":7444"

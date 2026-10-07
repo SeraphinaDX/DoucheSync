@@ -45,7 +45,7 @@ func newNetwork(t *testing.T, deletes bool) *testNetwork {
 	n := &testNetwork{server: httptest.NewServer(NewDiscovery(ServerConfig{Token: testToken, MaxPeers: 100})), dirA: t.TempDir(), dirB: t.TempDir()}
 	config := func(id, dir string) Config {
 		addr := freeAddress(t)
-		return Config{Client: ClientConfig{DeviceID: id, Listen: addr, AdvertiseURL: "https://" + addr, DiscoveryURL: n.server.URL, DiscoveryToken: testToken, AllowHTTPDiscovery: true}, Folders: []FolderConfig{{ID: "documents", Path: dir, Secret: testSecret, SyncDeletes: deletes, MaxFileSize: 10 << 20}}}
+		return Config{Client: ClientConfig{DeviceID: id, IdentityDir: t.TempDir(), Listen: addr, AdvertiseURL: "https://" + addr, DiscoveryURL: n.server.URL, DiscoveryToken: testToken, AllowHTTPDiscovery: true}, Folders: []FolderConfig{{ID: "documents", Path: dir, Secret: testSecret, SyncDeletes: deletes, MaxFileSize: 10 << 20}}}
 	}
 	n.cfgA = config("alpha", n.dirA)
 	n.cfgB = config("beta", n.dirB)
@@ -117,7 +117,7 @@ func TestBidirectionalUpdatesAndRestart(t *testing.T) {
 	if get(t, n.dirA, "nested/space & 日本語.txt") != "edited on beta" {
 		t.Fatal("update not synchronized")
 	}
-	// Restart both clients with their existing on-disk history and new TLS certs.
+	// Restart both clients with their existing history and saved TLS identities.
 	n.a.unregister()
 	n.b.unregister()
 	n.a.Close()

@@ -80,6 +80,7 @@ def main():
                 # JSON-escaped string literals also work as TOML basic strings.
                 cfg.write_text(
                     f'[client]\ndevice_id = "machine-{i}"\n'
+                    f'identity_dir = {json.dumps(str(work / "identities"))}\n'
                     f'listen = "127.0.0.1:{peer_port}"\n'
                     f'advertise_url = "https://127.0.0.1:{peer_port}"\n'
                     f'discovery_url = "http://127.0.0.1:{port}"\n'

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise real DoucheSync processes. Uses only Python's standard library."""
 import json
+import hashlib
 import pathlib
 import secrets
 import socket
@@ -84,7 +85,7 @@ def main():
                     # Omitted advertisement selects the actual bound address/port.
                     f'discovery_url = "http://127.0.0.1:{port}"\n'
                     f'discovery_token = "{token}"\nallow_http_discovery = true\n'
-                    'scan_interval = "1s"\ntransfer_timeout = "30s"\n'
+                    'scan_interval = "10s"\ntransfer_timeout = "30s"\n'
                     f'[[folders]]\nid = "shared"\npath = {json.dumps(str(root))}\n'
                     f'secret = "{secret}"\nsync_deletes = true\n')
                 launch("client", cfg, work)
@@ -101,12 +102,32 @@ def main():
                 if token in result.stdout or secret in result.stdout:
                     raise RuntimeError("peer diagnosis printed a secret")
             print("PASS: each client diagnosed both peers alongside running clients", flush=True)
+
+            def local_entry(root, path):
+                try:
+                    state = json.loads((root / ".douchesync/state.json").read_text())
+                    return state["entries"].get(path, {})
+                except (FileNotFoundError, json.JSONDecodeError):
+                    return {}
+
             (folders[1] / "origin-0.txt").write_text("updated on machine 1")
+            expected = hashlib.sha256(b"updated on machine 1").hexdigest()
+            wait_for(lambda: local_entry(folders[1], "origin-0.txt").get("hash") == expected,
+                     processes, logs, "watcher indexed the local edit before the 10s poll", 3)
             wait_for(lambda: all(content(root / "origin-0.txt") == "updated on machine 1"
                                  for root in folders), processes, logs, "remote update propagated")
             (folders[2] / "origin-2.txt").unlink()
+            wait_for(lambda: local_entry(folders[2], "origin-2.txt").get("deleted"),
+                     processes, logs, "watcher indexed the local deletion promptly", 3)
             wait_for(lambda: all(not (root / "origin-2.txt").exists() for root in folders),
                      processes, logs, "deletion propagated")
+            nested = folders[0] / "new/deep/file.txt"
+            nested.parent.mkdir(parents=True)
+            nested.write_text("nested change")
+            wait_for(lambda: bool(local_entry(folders[0], "new/deep/file.txt").get("hash")),
+                     processes, logs, "watcher indexed a newly created subtree", 3)
+            wait_for(lambda: all(content(root / "new/deep/file.txt") == "nested change" for root in folders),
+                     processes, logs, "new subtree propagated")
             if list(server_dir.iterdir()):
                 raise RuntimeError("discovery wrote files to its working directory")
             print("PASS: discovery working directory contains no files", flush=True)

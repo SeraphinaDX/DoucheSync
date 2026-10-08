@@ -44,6 +44,8 @@ type Client struct {
 	nat             *natManager
 	natProblem      string
 	transferTimeout time.Duration
+	watchers        map[*Folder]*folderWatcher
+	wake            chan struct{}
 }
 
 type peerCheck struct {
@@ -65,6 +67,11 @@ func NewClient(cfg Config) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
+	fullScanInterval, err := duration(cfg.Client.FullScanInterval, defaultFullScanInterval)
+	if err != nil {
+		identity.Close()
+		return nil, err
+	}
 	timeout, _ := duration(cfg.Client.TransferTimeout, 30*time.Minute)
 	c := &Client{cfg: cfg.Client, folders: map[string]*Folder{}, fingerprint: identity.Fingerprint, identity: identity, peers: map[string][]Announcement{}, transferTimeout: timeout}
 	c.http = &http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return errors.New("discovery redirects are forbidden") }}
@@ -79,6 +86,7 @@ func NewClient(cfg Config) (*Client, error) {
 		if e != nil {
 			return nil, fmt.Errorf("folder %s: %w", fc.ID, e)
 		}
+		f.fullScanInterval = fullScanInterval
 		c.folders[roomID(fc)] = f
 	}
 	c.server = &http.Server{Handler: c, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16384, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS13, Certificates: []tls.Certificate{identity.Certificate}}}
@@ -107,6 +115,9 @@ func NewClient(cfg Config) (*Client, error) {
 	return c, nil
 }
 func (c *Client) Close() {
+	for _, w := range c.watchers {
+		w.close()
+	}
 	if c.server != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_ = c.server.Shutdown(ctx)
@@ -306,6 +317,7 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 			accepted = append(accepted, p)
 		}
 		c.mu.Lock()
+		changed := false
 		previous := map[string]Announcement{}
 		for _, p := range c.peers[room] {
 			previous[p.Device] = p
@@ -313,6 +325,7 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 		for _, p := range accepted {
 			old, known := previous[p.Device]
 			if !known || old.URL != p.URL || !slices.Equal(old.URLs, p.URLs) || old.Fingerprint != p.Fingerprint {
+				changed = true
 				log.Printf("[%s] discovered peer %s at %s", f.cfg.ID, p.Device, p.URL)
 				for _, u := range p.URLs {
 					log.Printf("[%s] peer %s alternative endpoint: %s", f.cfg.ID, p.Device, u)
@@ -323,6 +336,7 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 		}
 		for _, p := range c.peers[room] {
 			if !seen[p.Device] {
+				changed = true
 				log.Printf("[%s] peer %s no longer advertised by discovery", f.cfg.ID, p.Device)
 				delete(c.peerChecks, room+"/"+p.Device)
 				delete(c.preferred, room+"/"+p.Device)
@@ -330,6 +344,12 @@ func (c *Client) PollDiscovery(ctx context.Context) error {
 		}
 		c.peers[room] = accepted
 		c.mu.Unlock()
+		if changed {
+			select {
+			case c.wake <- struct{}{}:
+			default:
+			}
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -352,12 +372,22 @@ func peerGET(ctx context.Context, h *http.Client, a Announcement, f *Folder, uri
 	return h.Do(r)
 }
 func (c *Client) Cycle(ctx context.Context) error {
+	return c.cycle(ctx, false)
+}
+
+func (c *Client) cycle(ctx context.Context, watched bool) error {
 	c.cycleMu.Lock()
 	defer c.cycleMu.Unlock()
 	var errs []error
 	for room, f := range c.folders {
-		if err := f.Scan(); err != nil {
-			errs = append(errs, fmt.Errorf("scan %s: %w", f.cfg.ID, err))
+		var scanErr error
+		if w := c.watchers[f]; watched && w != nil {
+			scanErr = w.scanIfNeeded()
+		} else {
+			scanErr = f.Scan()
+		}
+		if scanErr != nil {
+			errs = append(errs, fmt.Errorf("scan %s: %w", f.cfg.ID, scanErr))
 			continue
 		}
 		c.mu.Lock()
@@ -473,7 +503,20 @@ func (c *Client) syncPeer(ctx context.Context, f *Folder, a Announcement) error 
 		}
 		pending = append(pending, p)
 	}
+	livePending := paths[:0]
+	for _, p := range paths {
+		l, known := f.state.Entries[p]
+		r := remote[p]
+		relation := compareClock(l.Clock, r.Clock)
+		// The cycle's scan has already observed local edits. Matching or
+		// older peer records need no worker or second metadata walk.
+		if f.healthy && known && !l.Missing && (relation == 1 || relation == 0 && sameContent(l, r)) {
+			continue
+		}
+		livePending = append(livePending, p)
+	}
 	f.mu.Unlock()
+	paths = livePending
 	deletePaths = pending
 	deleteWorkers, _ := parallelDeletes(c.cfg.ParallelDeletes)
 	started := time.Now()
@@ -629,7 +672,7 @@ func (c *Client) applyEntry(ctx context.Context, h *http.Client, a Announcement,
 		f.mu.Unlock()
 		return errors.New("folder history exceeds 100000 paths")
 	}
-	if err = f.refreshLocked(p); err != nil {
+	if err = f.refreshVerifiedLocked(p, true); err != nil {
 		f.mu.Unlock()
 		return err
 	}
@@ -726,6 +769,9 @@ func runClient(ctx context.Context, cfg Config, once bool) error {
 	if once {
 		return c.Cycle(ctx)
 	}
+	if err = c.startWatchers(); err != nil {
+		return err
+	}
 	// Discovery heartbeats run independently of expensive scans/transfers.
 	done := make(chan struct{})
 	go func() {
@@ -744,8 +790,13 @@ func runClient(ctx context.Context, cfg Config, once bool) error {
 		}
 	}()
 	interval, _ := duration(cfg.Client.ScanInterval, 10*time.Second)
+	if len(c.watchers) != 0 {
+		rescan, _ := duration(cfg.Client.RescanInterval, defaultRescanInterval)
+		full, _ := duration(cfg.Client.FullScanInterval, defaultFullScanInterval)
+		interval = min(interval, rescan, full)
+	}
 	for {
-		if err = c.Cycle(ctx); err != nil && ctx.Err() == nil {
+		if err = c.cycle(ctx, true); err != nil && ctx.Err() == nil {
 			log.Printf("sync: %v", err)
 		}
 		timer := time.NewTimer(interval)
@@ -755,6 +806,22 @@ func runClient(ctx context.Context, cfg Config, once bool) error {
 			<-done
 			return nil
 		case <-timer.C:
+		case <-c.wake:
+			timer.Stop()
+			// A fixed, bounded debounce coalesces bursts without starving
+			// synchronization during a stream of filesystem events.
+			debounce := time.NewTimer(250 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				debounce.Stop()
+				<-done
+				return nil
+			case <-debounce.C:
+			}
+			select {
+			case <-c.wake:
+			default:
+			}
 		}
 	}
 }

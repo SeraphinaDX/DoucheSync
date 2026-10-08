@@ -19,7 +19,8 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-const version = "0.3.2"
+const version = "0.4.0"
+const defaultFullScanInterval = 24 * time.Hour
 const defaultParallelTransfers = 4
 const maxParallelTransfers = 32
 const maxManifestBytes = 64 << 20
@@ -49,6 +50,9 @@ type ClientConfig struct {
 	DiscoveryToken     string `toml:"discovery_token"`
 	AllowHTTPDiscovery bool   `toml:"allow_http_discovery"`
 	ScanInterval       string `toml:"scan_interval"`
+	FullScanInterval   string `toml:"full_scan_interval"`
+	RescanInterval     string `toml:"rescan_interval"`
+	Watch              *bool  `toml:"watch"`
 	TransferTimeout    string `toml:"transfer_timeout"`
 	ParallelTransfers  int    `toml:"parallel_transfers"`
 	ParallelDeletes    int    `toml:"parallel_deletes"`
@@ -194,6 +198,12 @@ func readConfig(name, mode string) (Config, error) {
 		return c, errors.New("discovery_token must contain at least 32 characters")
 	}
 	if _, err = duration(c.Client.ScanInterval, 10*time.Second); err != nil {
+		return c, err
+	}
+	if _, err = duration(c.Client.FullScanInterval, defaultFullScanInterval); err != nil {
+		return c, err
+	}
+	if _, err = duration(c.Client.RescanInterval, defaultRescanInterval); err != nil {
 		return c, err
 	}
 	if _, err = duration(c.Client.TransferTimeout, 30*time.Minute); err != nil {

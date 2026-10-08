@@ -1,6 +1,6 @@
 # DoucheSync
 
-DoucheSync 0.3.2 synchronizes files in one or more folders directly between
+DoucheSync 0.4.0 synchronizes files in one or more folders directly between
 machines. It is written in Go and configured with TOML.
 
 One executable has two modes:
@@ -20,6 +20,7 @@ secrets** determine which folders synchronize.
 ## What this release includes
 
 - Multiple independent folders with separate shared secrets.
+- Recursive filesystem notifications, incremental hashing, and quiet idle folders.
 - Automatic local address selection, optional interface selection, and IP refresh.
 - Optional NAT-PMP/UPnP TCP port mapping with signed LAN/WAN endpoint alternatives.
 - Automatic bidirectional polling, offline edits, and persistent version history.
@@ -181,9 +182,9 @@ CGO_ENABLED=0 go build -trimpath -o DoucheSync .
 ./DoucheSync version
 ```
 
-Or run `make build` from the checkout. There is no cgo requirement. The only
-Go module dependency is the BurntSushi TOML parser. Its source and MIT license
-are vendored, so building from a complete checkout does not download modules.
+Or run `make build` from the checkout. There is no cgo requirement. The TOML
+parser, fsnotify, and its platform support dependency are vendored with their
+licenses, so building from a complete checkout does not download modules.
 
 On Windows, use PowerShell:
 
@@ -273,8 +274,9 @@ Create its local folders and start its client using the same command.
 
 Add a file to either shared folder. It should appear on the other machine
 after discovery and scanning. New peers are discovered every 20 seconds;
-scans normally run every 10 seconds. A long scan or transfer can lengthen the
-time between scans, while discovery heartbeats continue independently.
+filesystem events trigger local scans promptly, and peer checks normally run
+every 10 seconds. A long scan or transfer can lengthen the time between checks,
+while discovery heartbeats continue independently.
 
 ### 5. Add more machines or folders
 
@@ -294,7 +296,10 @@ advertise_url = "auto"                    # optional; auto is the default
 nat_traversal = false                     # true enables NAT-PMP/UPnP mapping
 discovery_url = "https://sync.example.com"
 discovery_token = "YOUR_RANDOM_DISCOVERY_KEY"
-scan_interval = "10s"                     # 1s through 24h
+scan_interval = "10s"                     # peer checks / polling fallback; 1s..24h
+watch = true                             # recursive fsnotify; enabled by default
+rescan_interval = "5m"                    # safety directory scan; 1s..24h
+full_scan_interval = "24h"                # complete content verification; 1s..24h
 transfer_timeout = "30m"                  # 1s through 24h
 parallel_transfers = 4                    # simultaneous downloads; 1..32
 parallel_deletes = 4                      # parallel deletion preparation; 1..32
@@ -325,10 +330,39 @@ transferred in full. This release does not implement filesystem watching,
 block-level transfers, or parallel chunks of a single large file. Initial
 scan time and disk/history writes can still limit throughput.
 
-Version 0.3.2 is a client performance update. Stop the clients, run
+Version 0.4.0 is a client performance update. Stop the clients, run
 `git pull --ff-only` and `make build`, then restart them. Existing configurations
-get four workers without edits; keep your IDs, secrets, identity files, and
+get filesystem watching and incremental hashing without edits; keep your IDs,
+secrets, identity files, and
 `.douchesync` history. A 0.2.0 discovery server remains compatible.
+
+### Filesystem watching and idle CPU
+
+Clients use fsnotify to watch all non-ignored directories, including new subtrees.
+Events wake synchronization after a bounded 250 ms debounce. Edits, atomic
+replacements, and deletions trigger a scan; writes inside `.douchesync` do not.
+Remote peers are still checked at `scan_interval`, so propagation also depends
+on the receiving client's next peer check and transfer time.
+
+An unchanged watched folder skips directory scanning between events and safety
+checks. A safety scan runs every `rescan_interval` (5 minutes by default), and
+complete content verification runs at startup and every `full_scan_interval`
+(24 hours by default). Safety scans reuse hashes only when file identity, size,
+modification time, permissions, and the operating system's change timestamp
+still match a verified read in this process. Event-affected files are invalidated.
+Unsupported change timestamps fall back to hashing. Idle scans do not rewrite
+history, and unchanged peer entries do not trigger additional content reads.
+
+Filesystem watchers can miss events on network mounts, or exhaust OS watch
+limits. Safety scans cover missed notifications. Watch creation/registration
+failures or event queue errors are logged and switch that folder to polling
+at `scan_interval`. Set `watch = false` to use polling explicitly; the hash
+cache still works. Shorter safety/full verification intervals increase IO.
+Peer checks may run sooner to honor a shorter verification interval.
+
+Initial scans, changed files, transfers, and scheduled full verification still
+use CPU. The first scan after a restart always reads contents again; cached
+hashes are not trusted across restarts.
 
 Keys must contain at least 32 characters. Generate real keys with `keygen`;
 placeholder strings are not secure keys. Unknown TOML settings are rejected
@@ -367,9 +401,10 @@ updates and at the end of the deletion phase. Pending records are replayed
 on startup, preserving version clocks after an interrupted batch. Recovery
 copies are still byte-verified and retained before removing a local file.
 
-Local deletes are discovered by the normal scan, so the delay still includes
-`scan_interval` (10 seconds by default) and scan time. Large files also take
-time to retain as recovery copies.
+Local deletes wake the filesystem watcher promptly. Receiving peers pull them
+at their next peer check (`scan_interval`, 10 seconds by default). Polling fallback
+and missed events can add delay. Large files also take time to retain as recovery
+copies.
 
 Since 0.3.2, deletion preparation hashes and copies up to four independent files
 at once, outside the shared folder lock. Set `parallel_deletes` under `[client]`
@@ -559,5 +594,6 @@ save. Use ordinary backups alongside synchronization.
 
 ## License
 
-GPL-3.0-or-later. See `LICENSE`. The vendored TOML parser uses its own MIT
-license, included under `vendor/github.com/BurntSushi/toml/`.
+GPL-3.0-or-later. See `LICENSE`. Vendored dependencies retain their own licenses:
+the TOML parser and fsnotify use MIT, and golang.org/x/sys uses BSD-3-Clause.
+Their license files are included alongside their vendored sources.

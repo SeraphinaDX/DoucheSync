@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 type Clock map[string]uint64
@@ -40,14 +42,20 @@ type State struct {
 	Entries map[string]Entry `json:"entries"`
 }
 type Folder struct {
-	cfg            FolderConfig
-	device         string
-	root           *os.Root
-	lock           *os.File
-	mu             sync.Mutex
-	state          State
-	healthy        bool
-	pendingUpdates int
+	cfg              FolderConfig
+	device           string
+	root             *os.Root
+	lock             *os.File
+	mu               sync.Mutex
+	state            State
+	healthy          bool
+	pendingUpdates   int
+	dirty            bool
+	hashCache        map[string]cachedHash
+	fullScanInterval time.Duration
+	nextFullScan     time.Time
+	lastScan         ScanStats
+	hashBytes        atomic.Uint64
 }
 
 func cloneClock(c Clock) Clock {
@@ -195,7 +203,7 @@ func openFolder(cfg FolderConfig, device string) (*Folder, error) {
 	if err != nil {
 		return nil, err
 	}
-	f := &Folder{cfg: cfg, device: device, root: r}
+	f := &Folder{cfg: cfg, device: device, root: r, hashCache: map[string]cachedHash{}, fullScanInterval: defaultFullScanInterval}
 	ok := false
 	defer func() {
 		if !ok {
@@ -299,6 +307,7 @@ func (f *Folder) Close() {
 	}
 }
 func (f *Folder) saveLocked() (err error) {
+	f.dirty = true
 	defer func() { f.healthy = err == nil }()
 	b, err := json.MarshalIndent(f.state, "", "  ")
 	if err != nil {
@@ -329,7 +338,11 @@ func (f *Folder) saveLocked() (err error) {
 	}
 	// If a crash occurs after the checkpoint rename but before cleanup, replay
 	// skips records whose clocks are already included in the checkpoint.
-	return f.discardUpdatesLocked()
+	if err = f.discardUpdatesLocked(); err != nil {
+		return err
+	}
+	f.dirty = false
+	return nil
 }
 func (f *Folder) snapshot() map[string]Entry {
 	f.mu.Lock()
@@ -368,38 +381,55 @@ func (f *Folder) hashFile(name string) (Entry, error) {
 // timestamps; the final identity/stat check catches replacement while waiting
 // to commit.
 func (f *Folder) hashFileObserved(ctx context.Context, name string) (Entry, os.FileInfo, error) {
+	e, info, _, err := f.hashFileVersion(ctx, name)
+	return e, info, err
+}
+func (f *Folder) hashFileVersion(ctx context.Context, name string) (Entry, os.FileInfo, fileStamp, error) {
 	in, err := f.root.Open(filepath.FromSlash(name))
 	if err != nil {
-		return Entry{}, nil, err
+		return Entry{}, nil, fileStamp{}, err
 	}
 	defer in.Close()
 	before, err := in.Stat()
 	if err != nil {
-		return Entry{}, nil, err
+		return Entry{}, nil, fileStamp{}, err
 	}
 	if !before.Mode().IsRegular() {
-		return Entry{}, nil, errors.New("not a regular file")
+		return Entry{}, nil, fileStamp{}, errors.New("not a regular file")
 	}
 	if before.Size() > f.cfg.MaxFileSize {
-		return Entry{}, nil, fmt.Errorf("file exceeds max_file_size: %s", name)
+		return Entry{}, nil, fileStamp{}, fmt.Errorf("file exceeds max_file_size: %s", name)
 	}
+	beforeStamp := fileChangeStamp(in, before)
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(contextReader{ctx: ctx, in: in}, f.cfg.MaxFileSize+1))
+	f.hashBytes.Add(uint64(n))
 	if err != nil {
-		return Entry{}, nil, err
+		return Entry{}, nil, fileStamp{}, err
 	}
 	after, err := in.Stat()
 	if err != nil {
-		return Entry{}, nil, err
+		return Entry{}, nil, fileStamp{}, err
 	}
+	afterStamp := fileChangeStamp(in, after)
 	current, err := f.root.Lstat(filepath.FromSlash(name))
 	if err != nil {
-		return Entry{}, nil, err
+		return Entry{}, nil, fileStamp{}, err
 	}
 	if !os.SameFile(before, current) || n != before.Size() || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) || current.Size() != after.Size() || !current.ModTime().Equal(after.ModTime()) || current.Mode().Perm() != after.Mode().Perm() {
-		return Entry{}, nil, fmt.Errorf("file changed during scan: %s", name)
+		return Entry{}, nil, fileStamp{}, fmt.Errorf("file changed during scan: %s", name)
 	}
-	return Entry{Hash: hex.EncodeToString(h.Sum(nil)), Size: n, ModTime: after.ModTime().UnixNano(), Mode: uint32(after.Mode().Perm()), Clock: Clock{}}, current, nil
+	currentStamp, err := f.changeStamp(name, current)
+	if err != nil {
+		return Entry{}, nil, fileStamp{}, err
+	}
+	if beforeStamp.known && afterStamp.known && beforeStamp != afterStamp || afterStamp.known && currentStamp.known && afterStamp != currentStamp {
+		return Entry{}, nil, fileStamp{}, fmt.Errorf("file changed during scan: %s", name)
+	}
+	if !beforeStamp.known || !afterStamp.known {
+		currentStamp = fileStamp{}
+	}
+	return Entry{Hash: hex.EncodeToString(h.Sum(nil)), Size: n, ModTime: after.ModTime().UnixNano(), Mode: uint32(after.Mode().Perm()), Clock: Clock{}}, current, currentStamp, nil
 }
 func (f *Folder) observeLocked(p string, live *Entry) error {
 	old, ok := f.state.Entries[p]
@@ -408,7 +438,11 @@ func (f *Folder) observeLocked(p string, live *Entry) error {
 			return nil
 		}
 		if !f.cfg.SyncDeletes {
+			if old.Missing {
+				return nil
+			}
 			old.Missing = true
+			f.dirty = true
 			f.state.Entries[p] = old
 			return nil
 		}
@@ -421,6 +455,7 @@ func (f *Folder) observeLocked(p string, live *Entry) error {
 		}
 		old.Clock[f.device]++
 		old.Deleted = true
+		f.dirty = true
 		old.Missing = false
 		old.Hash = ""
 		old.Size = 0
@@ -428,6 +463,10 @@ func (f *Folder) observeLocked(p string, live *Entry) error {
 		return nil
 	}
 	next := *live
+	if ok && !old.Missing && sameContent(old, next) && old.ModTime == next.ModTime && old.Mode == next.Mode {
+		return nil
+	}
+	f.dirty = true
 	if ok && sameContent(old, next) {
 		next.Clock = cloneClock(old.Clock)
 		next.Conflicted = old.Conflicted
@@ -456,9 +495,15 @@ func (f *Folder) Scan() (err error) {
 			f.healthy = false
 		}
 	}()
+	now := time.Now()
+	full := !f.healthy || f.nextFullScan.IsZero() || !now.Before(f.nextFullScan)
+	stats := ScanStats{Full: full}
 	marker, err := f.root.ReadFile(".douchesync/identity")
 	if err != nil || string(marker) != f.state.Marker {
 		return errors.New("folder disappeared/identity changed; refusing scan")
+	}
+	if full {
+		log.Printf("[%s] full verification started", f.cfg.ID)
 	}
 	seen := map[string]Entry{}
 	err = fs.WalkDir(f.root.FS(), ".", func(p string, d fs.DirEntry, walkErr error) error {
@@ -490,9 +535,15 @@ func (f *Folder) Scan() (err error) {
 		if len(seen) >= maxEntries {
 			return errors.New("folder exceeds 100000 files")
 		}
-		entry, e := f.hashFile(p)
+		entry, reused, e := f.cachedFileLocked(p, info, full)
 		if e != nil {
 			return e
+		}
+		if reused {
+			stats.Reused++
+		} else {
+			stats.Hashed++
+			stats.HashedBytes += entry.Size
 		}
 		seen[p] = entry
 		return nil
@@ -511,6 +562,7 @@ func (f *Folder) Scan() (err error) {
 	for p := range f.state.Entries {
 		if f.ignored(p) {
 			delete(f.state.Entries, p)
+			f.dirty = true
 			continue
 		}
 		if _, ok := seen[p]; !ok {
@@ -526,9 +578,33 @@ func (f *Folder) Scan() (err error) {
 			}
 		}
 	}
-	return f.saveLocked()
+	for p := range f.hashCache {
+		if _, present := seen[p]; !present {
+			delete(f.hashCache, p)
+		}
+	}
+	if f.dirty || !f.healthy || f.pendingUpdates != 0 {
+		if err = f.saveLocked(); err != nil {
+			return err
+		}
+	}
+	if full {
+		f.nextFullScan = time.Now().Add(f.fullScanInterval)
+	}
+	f.lastScan = stats
+	if stats.Hashed != 0 {
+		label := ""
+		if full {
+			label = "; full verification"
+		}
+		log.Printf("[%s] scan: hashed %d files (%d bytes), reused %d%s", f.cfg.ID, stats.Hashed, stats.HashedBytes, stats.Reused, label)
+	}
+	return nil
 }
 func (f *Folder) refreshLocked(p string) error {
+	return f.refreshVerifiedLocked(p, false)
+}
+func (f *Folder) refreshVerifiedLocked(p string, force bool) error {
 	if err := f.checkAncestors(p); err != nil {
 		return err
 	}
@@ -546,7 +622,7 @@ func (f *Folder) refreshLocked(p string) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("destination is not a regular file")
 	}
-	e, err := f.hashFile(p)
+	e, _, err := f.cachedFileLocked(p, info, force)
 	if err != nil {
 		return err
 	}
